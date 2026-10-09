@@ -1,0 +1,7 @@
+{
+  "name": "Marmita Hub",
+  "description": "Sistema completo de gestão de pedidos, balcão e delivery para marmitarias",
+  "capabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

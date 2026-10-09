@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#1C1917" />
+    <title>Marmita Hub</title>
+    <meta name="description" content="Sistema completo de gestão de pedidos, balcão e delivery para marmitarias" />
+    <meta property="og:title" content="Marmita Hub" />
+    <meta property="og:description" content="Sistema completo de gestão de pedidos, balcão e delivery para marmitarias" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Work+Sans:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+    <script>
+      (function(){
+        var msgs = [
+          "ResizeObserver loop completed with undelivered notifications.",
+          "ResizeObserver loop limit exceeded",
+          "WebSocket closed without opened",
+          "failed to connect to websocket",
+          "WebSocket",
+          "websocket"
+        ];
+        function silence(e){
+          var m = (e && (e.message || (e.reason && (e.reason.message || e.reason)))) || "";
+          if (typeof m !== "string") {
+            try { m = String(m); } catch(_) { m = ""; }
+          }
+          if (msgs.some(function(x){ return m.indexOf(x) !== -1; })) {
+            if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+            if (e.stopPropagation) e.stopPropagation();
+            if (typeof e.preventDefault === "function") e.preventDefault();
+            return true;
+          }
+          return false;
+        }
+        window.addEventListener("error", silence, true);
+        window.addEventListener("unhandledrejection", silence, true);
+      })();
+    </script>
+  </head>
+  <body>
+    <noscript>Você precisa habilitar o JavaScript para rodar este aplicativo.</noscript>
+    <div id="root"></div>
+    <script type="module" src="/src/index.jsx"></script>
+  </body>
+</html>
