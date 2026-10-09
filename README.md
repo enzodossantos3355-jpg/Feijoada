@@ -16,7 +16,7 @@ Este projeto foi totalmente adaptado para publicação em produção no [Render]
    - **Branch**: `main`
    - **Root Directory**: Deixe em branco (raiz)
    - **Runtime**: `Node`
-   - **Build Command**: `npm install && npm run build`
+   - **Build Command**: `npm install --legacy-peer-deps && npm run build` (ou apenas `npm install && npm run build` graças ao `.npmrc`)
    - **Start Command**: `npm start`
    - **Instance Type**: `Free` (ou `Starter` para manter o bot sempre acordado sem hibernação de 15 minutos)
 

@@ -6,7 +6,7 @@ services:
     name: marmita-hub
     runtime: node
     plan: starter
-    buildCommand: npm install && npm run build
+    buildCommand: npm install --legacy-peer-deps && npm run build
     startCommand: npm start
     autoDeploy: true
     healthCheckPath: /api/whatsapp/status

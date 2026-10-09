@@ -4,7 +4,8 @@ WORKDIR /app
 
 # Instala dependências
 COPY package*.json ./
-RUN npm install
+COPY .npmrc ./
+RUN npm install --legacy-peer-deps
 
 # Copia todo o código-fonte
 COPY . .
