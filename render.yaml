@@ -1,0 +1,25 @@
+# Render Blueprint Specification (Infrastructure as Code)
+# https://render.com/docs/blueprint-spec
+
+services:
+  - type: web
+    name: marmita-hub
+    runtime: node
+    plan: starter
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    autoDeploy: true
+    healthCheckPath: /api/whatsapp/status
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: JWT_SECRET
+        generateValue: true
+      - key: GEMINI_API_KEY
+        sync: false # Preencha no painel do Render com sua chave do Google Gemini AI Studio
+      - key: WHATSAPP_AUTH_DIR
+        value: ./whatsapp_auth
+      # - key: VITE_BACKEND_URL
+      #   value: "" # Deixe vazio quando frontend e backend rodam no mesmo serviço

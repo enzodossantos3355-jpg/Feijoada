@@ -1,0 +1,8 @@
+node_modules
+dist
+whatsapp_auth
+.git
+.gitignore
+.env
+.env.*
+*.log

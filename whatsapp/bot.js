@@ -27,7 +27,9 @@ import {
 } from "./orderService.js";
 
 // Diretório para salvar as credenciais da sessão do WhatsApp
-const AUTH_DIR = path.resolve("./whatsapp_auth");
+const AUTH_DIR = process.env.WHATSAPP_AUTH_DIR
+  ? path.resolve(process.env.WHATSAPP_AUTH_DIR)
+  : path.resolve("./whatsapp_auth");
 
 // Instância ativa do socket
 let sock = null;
