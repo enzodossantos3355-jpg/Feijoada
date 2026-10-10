@@ -18,7 +18,18 @@ import {
   simulatePixReceiptValidation,
   getWhatsAppHealth,
   checkWhatsAppHealth,
+  startHealthCheckMonitor,
+  notifyClientOrderStatus,
+  sendManualChatMessage,
 } from "./whatsapp/bot.js";
+import {
+  getAllChats,
+  getChat,
+  getNotifications,
+  markNotificationRead,
+  clearAllNotifications,
+  toggleChatHumanMode,
+} from "./whatsapp/orderService.js";
 
 dotenv.config();
 
@@ -103,7 +114,7 @@ interface Order {
   surcharge: number;
   discount: number;
   notes?: string;
-  status: "Novo" | "Em Preparo" | "Pronto" | "Em Entrega" | "Concluído" | "Cancelado";
+  status: "Em Análise" | "Novo" | "Em Preparo" | "Pronto" | "Em Entrega" | "Concluído" | "Cancelado";
   delivery_zone_id?: string;
   archived: boolean;
   archived_at?: string;
@@ -176,6 +187,12 @@ let scheduledDeliveryFee = 5.0;
 let scheduledDeliveryHours = "Almoço: 11:30 às 13:30 | Jantar: 18:30 às 20:30";
 let pixKey = "11999999999 (Celular - Marmita Hub)";
 let pixBeneficiary = "Marmita Hub Delivery Ltda";
+let storeAddress = "Rua do Sabor, 150 - Centro, São Paulo - SP";
+let storeMapsUrl = "https://maps.google.com/?q=Rua+do+Sabor+150+Sao+Paulo";
+let businessHours = "Segunda a Sábado das 10h30 às 15h00 e das 18h00 às 22h00";
+let globalDayState: "open" | "closed" = "open";
+let globalDayOpenedAt: string = new Date().toISOString();
+let initialCashBalance: number = 0;
 let aiCustomInstructions = `Você é a atendente virtual da loja no WhatsApp.
 Seu objetivo é atender os clientes de forma educada, acolhedora, rápida e eficiente.
 
@@ -536,6 +553,9 @@ apiRouter.get("/store/status", (_req, res) => {
     ai_custom_instructions: aiCustomInstructions,
     pix_key: pixKey,
     pix_beneficiary: pixBeneficiary,
+    store_address: storeAddress,
+    store_maps_url: storeMapsUrl,
+    business_hours: businessHours,
   });
 });
 
@@ -553,6 +573,9 @@ apiRouter.post("/store/toggle-accepting", authMiddleware, (req, res) => {
     ai_custom_instructions: aiCustomInstructions,
     pix_key: pixKey,
     pix_beneficiary: pixBeneficiary,
+    store_address: storeAddress,
+    store_maps_url: storeMapsUrl,
+    business_hours: businessHours,
   });
 });
 
@@ -581,6 +604,15 @@ apiRouter.put("/store/status", authMiddleware, (req, res) => {
   if (req.body?.pix_beneficiary != null) {
     pixBeneficiary = String(req.body.pix_beneficiary);
   }
+  if (req.body?.store_address != null) {
+    storeAddress = String(req.body.store_address);
+  }
+  if (req.body?.store_maps_url != null) {
+    storeMapsUrl = String(req.body.store_maps_url);
+  }
+  if (req.body?.business_hours != null) {
+    businessHours = String(req.body.business_hours);
+  }
   return res.json({
     accepting_orders: acceptingOrders,
     high_demand_message: highDemandMessage,
@@ -590,6 +622,9 @@ apiRouter.put("/store/status", authMiddleware, (req, res) => {
     ai_custom_instructions: aiCustomInstructions,
     pix_key: pixKey,
     pix_beneficiary: pixBeneficiary,
+    store_address: storeAddress,
+    store_maps_url: storeMapsUrl,
+    business_hours: businessHours,
   });
 });
 
@@ -752,6 +787,9 @@ apiRouter.get("/whatsapp/catalog-context", (_req, res) => {
 
   return res.json({
     accepting_orders: acceptingOrders,
+    is_caixa_open: globalDayState === "open",
+    day_state: globalDayState,
+    initial_cash_balance: initialCashBalance,
     high_demand_message: highDemandMessage,
     scheduled_delivery_enabled: scheduledDeliveryEnabled,
     scheduled_delivery_fee: scheduledDeliveryFee,
@@ -759,6 +797,9 @@ apiRouter.get("/whatsapp/catalog-context", (_req, res) => {
     ai_custom_instructions: aiCustomInstructions,
     pix_key: pixKey,
     pix_beneficiary: pixBeneficiary,
+    store_address: storeAddress,
+    store_maps_url: storeMapsUrl,
+    business_hours: businessHours,
     products: activeProducts,
     customers: allCustomers,
     delivery_zones: allZones,
@@ -767,6 +808,10 @@ apiRouter.get("/whatsapp/catalog-context", (_req, res) => {
 
 // Internal endpoint to save WhatsApp confirmed order into PDV
 apiRouter.post("/whatsapp/internal-order", (req, res) => {
+  if (globalDayState === "closed") {
+    return res.status(400).json({ detail: "Caixa fechado. Pedidos pelo WhatsApp suspensos até a abertura do caixa." });
+  }
+
   const {
     order_code,
     customer_name,
@@ -807,7 +852,7 @@ apiRouter.post("/whatsapp/internal-order", (req, res) => {
     surcharge: 0,
     discount: 0,
     notes: notes ? `[WhatsApp #${order_code}] ${notes}` : `[WhatsApp #${order_code}]`,
-    status: "Novo",
+    status: req.body?.status || "Em Análise",
     archived: false,
     total: calculatedTotal,
     created_at: nowUtc(),
@@ -839,6 +884,88 @@ apiRouter.post("/whatsapp/internal-order", (req, res) => {
   }
 
   return res.json({ success: true, order: newOrder });
+});
+
+// WhatsApp Chats & Conversas separadas
+apiRouter.get("/whatsapp/chats", authMiddleware, (_req, res) => {
+  try {
+    const chatList = getAllChats();
+    // Vincula dados atualizados de pedidos correspondentes
+    const enhancedChats = chatList.map((ch) => {
+      let linkedOrder = null;
+      if (ch.order_id && orders.has(ch.order_id)) {
+        linkedOrder = orders.get(ch.order_id);
+      } else if (ch.order_code) {
+        linkedOrder = Array.from(orders.values()).find(
+          (o) => o.notes?.includes(ch.order_code) || o.order_id.toLowerCase().includes(ch.order_code.toLowerCase())
+        );
+      }
+      return {
+        ...ch,
+        linked_order: linkedOrder || null,
+      };
+    });
+    return res.json(enhancedChats);
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+apiRouter.get("/whatsapp/chats/:chat_id", authMiddleware, (req, res) => {
+  const { chat_id } = req.params;
+  const chat = getChat(chat_id);
+  if (!chat) {
+    return res.status(404).json({ detail: "Conversa não encontrada" });
+  }
+  let linkedOrder = null;
+  if (chat.order_id && orders.has(chat.order_id)) {
+    linkedOrder = orders.get(chat.order_id);
+  } else if (chat.order_code) {
+    linkedOrder = Array.from(orders.values()).find(
+      (o) => o.notes?.includes(chat.order_code) || o.order_id.toLowerCase().includes(chat.order_code.toLowerCase())
+    );
+  }
+  return res.json({ ...chat, linked_order: linkedOrder });
+});
+
+apiRouter.post("/whatsapp/chats/:chat_id/message", authMiddleware, async (req: AuthenticatedRequest, res) => {
+  const { chat_id } = req.params;
+  const { text } = req.body || {};
+  if (!text || !String(text).trim()) {
+    return res.status(400).json({ detail: "Texto da mensagem é obrigatório" });
+  }
+
+  const attendantName = req.user?.name || "Atendente";
+  try {
+    const result = await sendManualChatMessage(chat_id, String(text).trim(), attendantName);
+    return res.json(result);
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+apiRouter.post("/whatsapp/chats/:chat_id/toggle-human", authMiddleware, (req, res) => {
+  const { chat_id } = req.params;
+  const { enable_human = true } = req.body || {};
+  const updatedChat = toggleChatHumanMode(chat_id, Boolean(enable_human));
+  return res.json(updatedChat);
+});
+
+// Fila de notificações do sistema (com som)
+apiRouter.get("/whatsapp/notifications", authMiddleware, (_req, res) => {
+  const notifs = getNotifications();
+  return res.json(notifs);
+});
+
+apiRouter.post("/whatsapp/notifications/:id/read", authMiddleware, (req, res) => {
+  const { id } = req.params;
+  const updated = markNotificationRead(id);
+  return res.json({ success: true, notification: updated });
+});
+
+apiRouter.post("/whatsapp/notifications/clear-all", authMiddleware, (_req, res) => {
+  clearAllNotifications();
+  return res.json({ success: true });
 });
 
 // Confirm Pix payment from WhatsApp receipt analysis
@@ -1116,8 +1243,8 @@ apiRouter.get("/orders", authMiddleware, (req: AuthenticatedRequest, res) => {
 
 apiRouter.post("/orders", authMiddleware, (req: AuthenticatedRequest, res) => {
   const user = req.user!;
-  if (user.day_state === "closed") {
-    return res.status(400).json({ detail: "Dia fechado. Abra um novo dia para criar pedidos." });
+  if (globalDayState === "closed" || user.day_state === "closed") {
+    return res.status(400).json({ detail: "Caixa do dia fechado! Abra o caixa para registrar pedidos." });
   }
 
   const {
@@ -1213,7 +1340,34 @@ apiRouter.put("/orders/:order_id", authMiddleware, (req: AuthenticatedRequest, r
   return res.json(updated);
 });
 
-apiRouter.patch("/orders/:order_id/status", authMiddleware, (req: AuthenticatedRequest, res) => {
+apiRouter.post("/orders/:order_id/approve", authMiddleware, async (req: AuthenticatedRequest, res) => {
+  const userId = req.user!.user_id;
+  const { order_id } = req.params;
+  const existing = orders.get(order_id);
+
+  if (!existing || existing.user_id !== userId) {
+    return res.status(404).json({ detail: "Pedido não encontrado" });
+  }
+
+  // Altera status de "Em Análise" para "Novo" (ou "Em Preparo")
+  existing.status = "Novo";
+  existing.updated_at = nowUtc();
+  orders.set(order_id, existing);
+
+  // Notifica o cliente no WhatsApp que o pedido foi conferido e aprovado!
+  const phone = existing.customer_phone || "";
+  if (phone) {
+    try {
+      await notifyClientOrderStatus(phone, "Aprovado", existing);
+    } catch (e: any) {
+      console.warn("[Orders] Falha ao notificar aprovação de pedido no WhatsApp:", e.message);
+    }
+  }
+
+  return res.json(existing);
+});
+
+apiRouter.patch("/orders/:order_id/status", authMiddleware, async (req: AuthenticatedRequest, res) => {
   const userId = req.user!.user_id;
   const { order_id } = req.params;
   const { status } = req.body || {};
@@ -1226,6 +1380,18 @@ apiRouter.patch("/orders/:order_id/status", authMiddleware, (req: AuthenticatedR
   existing.status = status;
   existing.updated_at = nowUtc();
   orders.set(order_id, existing);
+
+  // Avisa automaticamente o cliente no WhatsApp de acordo com o status atualizado
+  // (Pronto: avisa que está pronto; Em Entrega: avisa que saiu para entrega; Concluído: avisa e manda o resumo)
+  const phone = existing.customer_phone || "";
+  if (phone && ["Pronto", "Em Entrega", "Concluído"].includes(status)) {
+    try {
+      await notifyClientOrderStatus(phone, status, existing);
+    } catch (e: any) {
+      console.warn(`[Orders] Falha ao notificar status "${status}" no WhatsApp:`, e.message);
+    }
+  }
+
   return res.json(existing);
 });
 
@@ -1524,9 +1690,9 @@ apiRouter.get("/reports/summary", authMiddleware, (req: AuthenticatedRequest, re
 // Day close & management
 apiRouter.get("/day/status", authMiddleware, (req: AuthenticatedRequest, res) => {
   const user = req.user!;
-  const dayState = user.day_state || "open";
+  const dayState = globalDayState || user.day_state || "open";
   const dayOpenedAt =
-    user.day_opened_at || new Date(new Date().setHours(0, 0, 0, 0)).toISOString();
+    globalDayOpenedAt || user.day_opened_at || new Date(new Date().setHours(0, 0, 0, 0)).toISOString();
   const lastCloseAt = user.last_close_at || null;
 
   const userActiveOrders = Array.from(orders.values()).filter(
@@ -1537,17 +1703,29 @@ apiRouter.get("/day/status", authMiddleware, (req: AuthenticatedRequest, res) =>
     (o) => !["Concluído", "Cancelado"].includes(o.status)
   );
 
-  const revenue = userActiveOrders
-    .filter((o) => o.status !== "Cancelado")
-    .reduce((acc, o) => acc + o.total, 0);
+  const validOrders = userActiveOrders.filter((o) => o.status !== "Cancelado");
+
+  const revenue = validOrders.reduce((acc, o) => acc + o.total, 0);
 
   const pendingPayment = userActiveOrders.filter(
     (o) => o.payment_method === "Pendente" && o.status !== "Cancelado"
   ).length;
 
+  // Breakdown por forma de pagamento no caixa atual
+  const byPaymentMap = new Map<string, { method: string; total: number; count: number }>();
+  for (const o of validOrders) {
+    const pm = o.payment_method || "Outro";
+    const e = byPaymentMap.get(pm) || { method: pm, total: 0, count: 0 };
+    e.total += o.total;
+    e.count += 1;
+    byPaymentMap.set(pm, e);
+  }
+
   return res.json({
     day_state: dayState,
+    is_open: dayState === "open",
     day_opened_at: dayOpenedAt,
+    initial_cash_balance: initialCashBalance,
     last_close_at: lastCloseAt,
     period_start: dayOpenedAt,
     now: nowUtc(),
@@ -1555,25 +1733,35 @@ apiRouter.get("/day/status", authMiddleware, (req: AuthenticatedRequest, res) =>
     total_orders: userActiveOrders.length,
     revenue: Math.round(revenue * 100) / 100,
     pending_payment_orders: pendingPayment,
+    by_payment: Array.from(byPaymentMap.values()),
   });
 });
 
 apiRouter.post("/day/open", authMiddleware, (req: AuthenticatedRequest, res) => {
   const user = req.user!;
   const openedAt = nowUtc();
+  globalDayState = "open";
+  globalDayOpenedAt = openedAt;
+  if (req.body?.initial_cash != null) {
+    initialCashBalance = Number(req.body.initial_cash) || 0;
+  }
   user.day_state = "open";
   user.day_opened_at = openedAt;
   users.set(user.user_id, user);
 
   return res.json({
     day_state: "open",
+    is_open: true,
     day_opened_at: openedAt,
+    initial_cash_balance: initialCashBalance,
   });
 });
 
 apiRouter.post("/day/close", authMiddleware, (req: AuthenticatedRequest, res) => {
   const user = req.user!;
+  globalDayState = "closed";
   const periodStart =
+    globalDayOpenedAt ||
     user.day_opened_at ||
     user.last_close_at ||
     new Date(new Date().setHours(0, 0, 0, 0)).toISOString();
@@ -2003,6 +2191,7 @@ async function startServer() {
 
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`Marmita Hub server ready at http://0.0.0.0:${PORT}`);
+    startHealthCheckMonitor();
   });
 }
 

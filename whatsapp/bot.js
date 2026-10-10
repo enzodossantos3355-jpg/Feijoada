@@ -9,7 +9,16 @@ import qrcodeTerminal from "qrcode-terminal";
 import QRCode from "qrcode";
 import path from "path";
 import fs from "fs";
-import { formatOrderConfirmedMessage } from "./config.js";
+import {
+  formatOrderConfirmedMessage,
+  formatOrderInReviewMessage,
+  formatOrderApprovedMessage,
+  formatOrderReadyMessage,
+  formatOrderOutForDeliveryMessage,
+  formatOrderCompletedMessage,
+  formatHumanHandoffMessage,
+  BOT_TAG,
+} from "./config.js";
 import {
   processCustomerMessageWithAI,
   processCustomerAudio,
@@ -24,6 +33,16 @@ import {
   setConfirmedOrder,
   getConfirmedOrder,
   confirmOrderPaymentInPDV,
+  addChatMessage,
+  getOrCreateChat,
+  getAllChats,
+  getChat,
+  setChatStatus,
+  toggleChatHumanMode,
+  addNotification,
+  getNotifications,
+  markNotificationRead,
+  clearAllNotifications,
 } from "./orderService.js";
 
 // Diretório para salvar as credenciais da sessão do WhatsApp
@@ -36,6 +55,9 @@ let sock = null;
 let currentQRDataUrl = null;
 let currentStatus = "disconnected"; // "disconnected" | "connecting" | "qr_ready" | "connected"
 let connectedPhone = null;
+let isStartingBot = false;
+let reconnectTimer = null;
+let disconnectDueToConflict = false;
 
 // Callbacks opcionais para avisar o sistema de PDV
 let onOrderConfirmedCallback = null;
@@ -58,6 +80,7 @@ export function getWhatsAppStatus() {
     qr_code: currentQRDataUrl,
     phone: connectedPhone,
     has_session: hasSession,
+    conflict: disconnectDueToConflict,
   };
 }
 
@@ -65,9 +88,18 @@ export function getWhatsAppStatus() {
  * Desconecta e limpa as credenciais do WhatsApp
  */
 export async function disconnectWhatsApp() {
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  disconnectDueToConflict = false;
   try {
     if (sock) {
-      await sock.logout();
+      try {
+        sock.ev?.removeAllListeners();
+        sock.ws?.close();
+      } catch {}
+      await sock.logout().catch(() => {});
     }
   } catch (e) {
     console.warn("[WhatsApp] Erro ao fazer logout do socket:", e);
@@ -87,14 +119,37 @@ export async function disconnectWhatsApp() {
  * Inicia o bot do WhatsApp usando @whiskeysockets/baileys
  */
 export async function startWhatsAppBot() {
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+
+  // Se já estiver conectado e saudável, nada a fazer
   if (currentStatus === "connected" && sock) {
     return { success: true, already_connected: true };
   }
 
+  // Previne múltiplas inicializações concorrentes
+  if (isStartingBot) {
+    return { success: true, message: "Conexão já em andamento..." };
+  }
+
+  isStartingBot = true;
+  disconnectDueToConflict = false;
   currentStatus = "connecting";
 
   if (!fs.existsSync(AUTH_DIR)) {
     fs.mkdirSync(AUTH_DIR, { recursive: true });
+  }
+
+  // Fecha com segurança qualquer socket anterior antes de criar novo
+  if (sock) {
+    try {
+      sock.ev?.removeAllListeners();
+      sock.ws?.close();
+      sock.end?.();
+    } catch {}
+    sock = null;
   }
 
   try {
@@ -120,156 +175,219 @@ export async function startWhatsAppBot() {
       printQRInTerminal: false,
       browser: ["Marmita Hub PDV", "Chrome", "1.0.0"],
       syncFullHistory: false,
-      generateHighQualityLinkPreview: true,
+      generateHighQualityLinkPreview: false,
+      markOnlineOnConnect: false,
+      keepAliveIntervalMs: 30000,
+      connectTimeoutMs: 60000,
+      defaultQueryTimeoutMs: 60000,
+      maxMsgRetryCount: 5,
     });
 
-  // Atualização das credenciais
-  sock.ev.on("creds.update", saveCreds);
+    // Atualização das credenciais
+    sock.ev.on("creds.update", saveCreds);
 
-  // Monitora o status da conexão
-  sock.ev.on("connection.update", async (update) => {
-    const { connection, lastDisconnect, qr } = update;
+    // Monitora o status da conexão
+    sock.ev.on("connection.update", async (update) => {
+      const { connection, lastDisconnect, qr } = update;
 
-    if (qr) {
-      currentStatus = "qr_ready";
-      try {
-        currentQRDataUrl = await QRCode.toDataURL(qr, {
-          width: 320,
-          margin: 2,
-          color: { dark: "#1C1917", light: "#FFFFFF" },
-        });
-      } catch (qrErr) {
-        console.error("[WhatsApp] Erro ao gerar imagem do QR Code:", qrErr);
+      if (qr) {
+        currentStatus = "qr_ready";
+        try {
+          currentQRDataUrl = await QRCode.toDataURL(qr, {
+            width: 320,
+            margin: 2,
+            color: { dark: "#1C1917", light: "#FFFFFF" },
+          });
+        } catch (qrErr) {
+          console.error("[WhatsApp] Erro ao gerar imagem do QR Code:", qrErr);
+        }
+
+        console.log("\n=======================================================");
+        console.log("📲 ESCANEIE O QR CODE NO TERMINAL OU NO APP WEB:");
+        console.log("=======================================================\n");
+        qrcodeTerminal.generate(qr, { small: true });
+        console.log("\n(Abra o WhatsApp > Aparelhos conectados > Conectar um aparelho)\n");
       }
 
-      console.log("\n=======================================================");
-      console.log("📲 ESCANEIE O QR CODE NO TERMINAL OU NO APP WEB:");
-      console.log("=======================================================\n");
-      qrcodeTerminal.generate(qr, { small: true });
-      console.log("\n(Abra o WhatsApp > Aparelhos conectados > Conectar um aparelho)\n");
-    }
+      if (connection === "close") {
+        const statusCode = lastDisconnect?.error?.output?.statusCode;
+        const reason =
+          lastDisconnect?.error?.output?.payload?.message ||
+          lastDisconnect?.error?.message ||
+          "Desconhecido";
+        const isLoggedOut = statusCode === DisconnectReason.loggedOut;
+        const isConflict =
+          statusCode === DisconnectReason.connectionReplaced ||
+          statusCode === 440 ||
+          String(reason).toLowerCase().includes("conflict");
 
-    if (connection === "close") {
-      const shouldReconnect =
-        lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-      const reason = lastDisconnect?.error?.output?.payload?.message || "Desconhecido";
+        currentStatus = "disconnected";
+        currentQRDataUrl = null;
+        connectedPhone = null;
 
-      currentStatus = "disconnected";
-      currentQRDataUrl = null;
-      connectedPhone = null;
+        console.log(
+          `[WhatsApp] Conexão fechada. Motivo: ${reason} (statusCode: ${statusCode}). Conflito: ${isConflict}`
+        );
 
-      console.log(`[WhatsApp] Conexão fechada. Motivo: ${reason}. Reconectando: ${shouldReconnect}`);
+        if (isConflict) {
+          disconnectDueToConflict = true;
+          console.warn(
+            "[WhatsApp] ⚠️ Sessão substituída ou conflito com outro aparelho/conexão. Reconexão automática em loop cancelada para proteger a sessão. Clique em reconectar no painel quando desejar."
+          );
+        } else if (!isLoggedOut) {
+          console.log("[WhatsApp] Reconexão programada em 5 segundos...");
+          if (reconnectTimer) clearTimeout(reconnectTimer);
+          reconnectTimer = setTimeout(() => {
+            startWhatsAppBot().catch((err) =>
+              console.error("[WhatsApp] Erro na reconexão:", err)
+            );
+          }, 5000);
+        } else {
+          console.log("[WhatsApp] Sessão encerrada (logged out).");
+        }
+      } else if (connection === "open") {
+        currentStatus = "connected";
+        currentQRDataUrl = null;
+        disconnectDueToConflict = false;
+        connectedPhone = sock?.user?.id
+          ? sock.user.id.split(":")[0].replace(/\D/g, "")
+          : "Conectado";
 
-      if (shouldReconnect) {
-        setTimeout(startWhatsAppBot, 4000);
-      } else {
-        console.log("[WhatsApp] Sessão encerrada (logged out).");
+        console.log("=======================================================");
+        console.log(`✅ WHATSAPP CONECTADO COM SUCESSO! Telefone: ${connectedPhone}`);
+        console.log("=======================================================");
       }
-    } else if (connection === "open") {
-      currentStatus = "connected";
-      currentQRDataUrl = null;
-      connectedPhone = sock?.user?.id ? sock.user.id.split(":")[0].replace(/\D/g, "") : "Conectado";
+    });
 
-      console.log("=======================================================");
-      console.log(`✅ WHATSAPP CONECTADO COM SUCESSO! Telefone: ${connectedPhone}`);
-      console.log("=======================================================");
-    }
-  });
-
-  // Escuta novas mensagens recebidas
-  sock.ev.on("messages.upsert", async ({ messages, type }) => {
-    if (type !== "notify") return;
-
-    for (const msg of messages) {
-      // Ignora mensagens enviadas por nós mesmos
-      if (msg.key.fromMe) continue;
-
-      const remoteJid = msg.key.remoteJid;
-      if (!remoteJid) continue;
-
-      // O bot atende exclusivamente conversas individuais com clientes (@s.whatsapp.net).
-      // Ignora canais/newsletters (@newsletter), grupos (@g.us), transmissões (@broadcast) e status.
-      if (
-        !remoteJid.endsWith("@s.whatsapp.net") ||
-        remoteJid.endsWith("@newsletter") ||
-        remoteJid.endsWith("@g.us") ||
-        remoteJid.endsWith("@broadcast") ||
-        remoteJid === "status@broadcast"
+    // Helper para desembrulhar mensagens aninhadas (mensagens temporárias, viewOnce, etc.)
+    const extractMessageContent = (msg) => {
+      if (!msg || !msg.message) return { text: "", isAudio: false, isImage: false, isDocument: false, raw: null };
+      let m = msg.message;
+      while (
+        m?.ephemeralMessage?.message ||
+        m?.viewOnceMessage?.message ||
+        m?.viewOnceMessageV2?.message ||
+        m?.documentWithCaptionMessage?.message ||
+        m?.editedMessage?.message
       ) {
-        continue;
+        m =
+          m.ephemeralMessage?.message ||
+          m.viewOnceMessage?.message ||
+          m.viewOnceMessageV2?.message ||
+          m.documentWithCaptionMessage?.message ||
+          m.editedMessage?.message;
       }
 
-      const pushName = msg.pushName || "Cliente";
+      const isAudio = Boolean(m?.audioMessage);
+      const isImage = Boolean(m?.imageMessage);
+      const isDocument = Boolean(m?.documentMessage);
 
-      // 1. Mensagem de Áudio enviada pelo cliente
-      if (msg.message?.audioMessage) {
-        console.log(`[WhatsApp] Recebeu ÁUDIO de ${pushName} (${remoteJid})`);
-        try {
-          await handleCustomerAudio(remoteJid, msg, pushName);
-        } catch (err) {
-          console.error(`[WhatsApp] Erro ao processar áudio de ${remoteJid}:`, err);
-          await sock.sendMessage(remoteJid, {
-            text: "Ops! Não consegui ouvir seu áudio com clareza. Você poderia mandar por escrito ou gravar novamente, por favor? 😊",
-          });
-        }
-        continue;
-      }
-
-      // 2. Mensagem de Imagem enviada pelo cliente (possível comprovante Pix)
-      if (msg.message?.imageMessage) {
-        console.log(`[WhatsApp] Recebeu IMAGEM de ${pushName} (${remoteJid})`);
-        try {
-          await handleCustomerImage(remoteJid, msg, pushName);
-        } catch (err) {
-          console.error(`[WhatsApp] Erro ao processar imagem de ${remoteJid}:`, err);
-          await sock.sendMessage(remoteJid, {
-            text: "Recebi sua imagem! Já estou encaminhando para conferência da nossa equipe. 👍",
-          });
-        }
-        continue;
-      }
-
-      // 2b. Mensagem de Documento/Arquivo enviada pelo cliente (ex: comprovante PDF do banco)
-      if (msg.message?.documentMessage) {
-        console.log(`[WhatsApp] Recebeu DOCUMENTO de ${pushName} (${remoteJid})`);
-        try {
-          await handleCustomerDocument(remoteJid, msg, pushName);
-        } catch (err) {
-          console.error(`[WhatsApp] Erro ao processar documento de ${remoteJid}:`, err);
-          await sock.sendMessage(remoteJid, {
-            text: "Recebi seu arquivo de comprovante! Já estou encaminhando para conferência da nossa equipe. 👍",
-          });
-        }
-        continue;
-      }
-
-      // 3. Mensagem em Texto
-      const messageText =
-        msg.message?.conversation ||
-        msg.message?.extendedTextMessage?.text ||
+      const text =
+        m?.conversation ||
+        m?.extendedTextMessage?.text ||
+        m?.imageMessage?.caption ||
+        m?.videoMessage?.caption ||
+        m?.documentMessage?.caption ||
+        m?.buttonsResponseMessage?.selectedDisplayText ||
+        m?.buttonsResponseMessage?.selectedButtonId ||
+        m?.listResponseMessage?.title ||
+        m?.listResponseMessage?.singleSelectReply?.selectedRowId ||
+        m?.templateButtonReplyMessage?.selectedId ||
         "";
 
-      const cleanText = messageText.trim();
-      if (!cleanText) continue;
+      return { text: (text || "").trim(), isAudio, isImage, isDocument, raw: m };
+    };
 
-      console.log(`[WhatsApp] Mensagem de ${pushName} (${remoteJid}): "${cleanText}"`);
+    // Escuta novas mensagens recebidas
+    sock.ev.on("messages.upsert", async ({ messages, type }) => {
+      if (type !== "notify" && type !== "append") return;
 
-      try {
-        await handleCustomerMessage(remoteJid, cleanText, pushName);
-      } catch (err) {
-        console.error(`[WhatsApp] Erro ao processar mensagem de ${remoteJid}:`, err);
-        await sock.sendMessage(remoteJid, {
-          text: "Ops! Tive um pequeno imprevisto aqui. Você poderia repetir sua última mensagem, por favor? 😊",
-        });
+      for (const msg of messages) {
+        // Ignora mensagens enviadas por nós mesmos
+        if (msg.key.fromMe) continue;
+
+        const remoteJid = msg.key.remoteJid;
+        if (!remoteJid) continue;
+
+        // O bot atende conversas individuais com clientes (@s.whatsapp.net, @c.us ou @lid)
+        // Ignora canais/newsletters (@newsletter), grupos (@g.us), transmissões (@broadcast) e status.
+        if (
+          remoteJid.endsWith("@newsletter") ||
+          remoteJid.endsWith("@g.us") ||
+          remoteJid.endsWith("@broadcast") ||
+          remoteJid === "status@broadcast"
+        ) {
+          continue;
+        }
+
+        const pushName = msg.pushName || "Cliente";
+        const { text: cleanText, isAudio, isImage, isDocument, raw: unwrappedMsg } = extractMessageContent(msg);
+
+        // 1. Mensagem de Áudio enviada pelo cliente
+        if (isAudio) {
+          console.log(`[WhatsApp] Recebeu ÁUDIO de ${pushName} (${remoteJid})`);
+          try {
+            await handleCustomerAudio(remoteJid, msg, pushName);
+          } catch (err) {
+            console.error(`[WhatsApp] Erro ao processar áudio de ${remoteJid}:`, err);
+            await sock.sendMessage(remoteJid, {
+              text: "Ops! Não consegui ouvir seu áudio com clareza. Você poderia mandar por escrito ou gravar novamente, por favor? 😊",
+            });
+          }
+          continue;
+        }
+
+        // 2. Mensagem de Imagem enviada pelo cliente (possível comprovante Pix)
+        if (isImage) {
+          console.log(`[WhatsApp] Recebeu IMAGEM de ${pushName} (${remoteJid})`);
+          try {
+            await handleCustomerImage(remoteJid, msg, pushName);
+          } catch (err) {
+            console.error(`[WhatsApp] Erro ao processar imagem de ${remoteJid}:`, err);
+            await sock.sendMessage(remoteJid, {
+              text: "Recebi sua imagem! Já estou encaminhando para conferência da nossa equipe. 👍",
+            });
+          }
+          continue;
+        }
+
+        // 2b. Mensagem de Documento/Arquivo enviada pelo cliente (ex: comprovante PDF do banco)
+        if (isDocument) {
+          console.log(`[WhatsApp] Recebeu DOCUMENTO de ${pushName} (${remoteJid})`);
+          try {
+            await handleCustomerDocument(remoteJid, msg, pushName);
+          } catch (err) {
+            console.error(`[WhatsApp] Erro ao processar documento de ${remoteJid}:`, err);
+            await sock.sendMessage(remoteJid, {
+              text: "Recebi seu arquivo de comprovante! Já estou encaminhando para conferência da nossa equipe. 👍",
+            });
+          }
+          continue;
+        }
+
+        // 3. Mensagem em Texto
+        if (!cleanText) continue;
+
+        console.log(`[WhatsApp] Mensagem de ${pushName} (${remoteJid}): "${cleanText}"`);
+
+        try {
+          await handleCustomerMessage(remoteJid, cleanText, pushName);
+        } catch (err) {
+          console.error(`[WhatsApp] Erro ao processar mensagem de ${remoteJid}:`, err);
+          await sock.sendMessage(remoteJid, {
+            text: "Ops! Tive um pequeno imprevisto aqui. Você poderia repetir sua mensagem, por favor? 😊",
+          });
+        }
       }
-    }
-  });
+    });
 
     return sock;
   } catch (err) {
     console.error("[WhatsApp] Erro ao inicializar o socket do Baileys:", err);
     currentStatus = "disconnected";
     throw err;
+  } finally {
+    isStartingBot = false;
   }
 }
 
@@ -305,106 +423,114 @@ export function simulateWhatsAppConnect(phone = "5511998765432") {
  * Trata o fluxo da mensagem recebida (mensagens exclusivamente escritas)
  */
 async function handleCustomerMessage(remoteJid, messageText, pushName) {
-  // Simula digitando
-  await sock.sendPresenceUpdate("composing", remoteJid);
-
-  const pendingOrder = getPendingOrder(remoteJid);
-  const lowerText = messageText.toLowerCase().trim();
-
-  // -------------------------------------------------------------
-  // CENÁRIO 1: O cliente tem um pedido aguardando e digitou "1"
-  // -------------------------------------------------------------
-  if (pendingOrder) {
-    const isConfirmation =
-      lowerText === "1" ||
-      lowerText === "sim" ||
-      lowerText === "confirmar" ||
-      lowerText === "confirmo" ||
-      lowerText === "pode confirmar";
-
-    if (isConfirmation) {
-      console.log(`[WhatsApp] Pedido #${pendingOrder.orderCode} CONFIRMADO por ${pushName}!`);
-
-      // Dispara a mensagem final de confirmação escrita
-      const confirmationMsg = formatOrderConfirmedMessage(pendingOrder.orderCode);
-      await sock.sendMessage(remoteJid, { text: confirmationMsg });
-
-      // Grava o pedido diretamente no sistema de PDV
-      const cleanPhone = remoteJid.replace("@s.whatsapp.net", "");
-      await registerOrderInPDV(pendingOrder, cleanPhone);
-
-      // Salva no histórico de pedidos confirmados para validação de comprovante Pix
-      setConfirmedOrder(remoteJid, pendingOrder);
-
-      // Notifica o PDV (se callback registrado)
-      if (onOrderConfirmedCallback) {
-        try {
-          await onOrderConfirmedCallback({
-            ...pendingOrder,
-            phone: cleanPhone,
-            confirmedAt: new Date().toISOString(),
-          });
-        } catch (callbackErr) {
-          console.error("[WhatsApp] Erro ao salvar pedido no PDV:", callbackErr);
-        }
-      }
-
-      // Limpa os estados da conversa e do rascunho
-      clearPendingOrder(remoteJid);
-      clearChatHistory(remoteJid);
-      return;
+  // Simula digitando se o socket estiver ativo
+  try {
+    if (sock?.sendPresenceUpdate) {
+      await sock.sendPresenceUpdate("composing", remoteJid);
     }
-
-    // Se o cliente quiser cancelar
-    if (lowerText === "cancelar" || lowerText === "cancela") {
-      clearPendingOrder(remoteJid);
-      clearChatHistory(remoteJid);
-      await sock.sendMessage(remoteJid, {
-        text: "Sem problemas! O seu pedido foi cancelado. Se quiser fazer um novo pedido, é só me chamar! 😉",
-      });
-      return;
-    }
-
-    // Se não for "1" nem cancelamento, ele quer alterar algo
-    clearPendingOrder(remoteJid);
+  } catch (presenceErr) {
+    // Ignore presence error
   }
 
-  // -------------------------------------------------------------
-  // CENÁRIO 2: Conversa com a IA para tirar dúvidas e extrair dados
-  // -------------------------------------------------------------
+  // Normaliza o identificador do cliente para o chat e histórico
+  const cleanPhone = remoteJid.replace(/@s\.whatsapp\.net|@lid|@c\.us/g, "").replace(/\D/g, "") || remoteJid;
+
+  // Registra a mensagem do cliente no chat daquele atendimento
+  addChatMessage(cleanPhone, { sender: "customer", text: messageText, pushName });
+
+  const currentChat = getOrCreateChat(cleanPhone, pushName);
+
+  // Se o atendimento já foi assumido por um atendente humano, o bot fica em silêncio
+  if (currentChat.is_human_controlled) {
+    console.log(`[WhatsApp] Atendimento humano em andamento para ${cleanPhone}. Bot silenciado.`);
+    return;
+  }
+
+  // Conversa com a IA para tirar dúvidas, atender e extrair dados
   const aiResult = await processCustomerMessageWithAI(remoteJid, messageText, pushName);
 
   // -------------------------------------------------------------
-  // CENÁRIO 3: Pedido COMPLETO -> Gera CÓDIGO e dispara resumo formatado
+  // CENÁRIO 1: IA não conseguiu identificar ou precisa passar para atendente humano
   // -------------------------------------------------------------
-  if (aiResult.is_complete) {
-    console.log(`[WhatsApp] IA identificou pedido COMPLETO para ${pushName}! Gerando código e resumo...`);
+  if (aiResult.needs_human) {
+    console.log(`[WhatsApp] Transferindo atendimento de ${pushName} (${cleanPhone}) para ATENDENTE HUMANO.`);
 
-    // Cria o pedido pendente com CÓDIGO ÚNICO e mensagem de resumo formatada
-    const newPendingOrder = createPendingOrder(remoteJid, {
-      ...aiResult,
-      customer_name: aiResult.customer_name || pushName,
+    const handoffMsg = aiResult.reply_text || formatHumanHandoffMessage();
+    try {
+      if (sock?.sendMessage) {
+        await sock.sendMessage(remoteJid, { text: handoffMsg });
+      }
+    } catch (sendErr) {
+      console.error(`[WhatsApp] Erro ao enviar mensagem de transição humana:`, sendErr.message);
+    }
+    addChatMessage(cleanPhone, { sender: "bot", text: handoffMsg, pushName });
+
+    // Atualiza status do chat e dispara notificação com som no sistema
+    setChatStatus(cleanPhone, "needs_human", {
+      customer_name: pushName,
+      is_human_controlled: false,
     });
 
-    console.log(`[WhatsApp] Disparando resumo do pedido #${newPendingOrder.orderCode}`);
-
-    // Dispara a mensagem formatada de confirmação pelo WhatsApp exatamente como solicitado
-    await sock.sendMessage(remoteJid, {
-      text: newPendingOrder.summaryMessage,
+    addNotification({
+      type: "needs_human",
+      title: `🚨 Atendimento Humano: ${pushName}`,
+      message: aiResult.needs_human_reason || "IA não conseguiu identificar o pedido ou cliente solicitou atendente",
+      phone: cleanPhone,
+      customer_name: pushName,
     });
     return;
   }
 
   // -------------------------------------------------------------
-  // CENÁRIO 4: Dúvida ou pedido incompleto -> IA responde somente em texto
+  // CENÁRIO 2: Pedido COMPLETO -> Anotado pela IA! Fica EM ANÁLISE!
   // -------------------------------------------------------------
-  const replyMessage =
+  if (aiResult.is_complete) {
+    console.log(`[WhatsApp] IA anotou pedido COMPLETO para ${pushName}! Colocando em análise...`);
+
+    // Cria o pedido em rascunho com CÓDIGO ÚNICO e resumo formatado com a tag de bot
+    const newPendingOrder = createPendingOrder(remoteJid, {
+      ...aiResult,
+      customer_name: aiResult.customer_name || pushName,
+    });
+
+    console.log(`[WhatsApp] Enviando resumo do pedido #${newPendingOrder.orderCode} em análise`);
+
+    // Dispara a mensagem formatada com o resumo do pedido e tag indicando bot atendendo
+    try {
+      if (sock?.sendMessage) {
+        await sock.sendMessage(remoteJid, {
+          text: newPendingOrder.summaryMessage,
+        });
+      }
+    } catch (sendErr) {
+      console.error(`[WhatsApp] Erro ao enviar resumo do pedido:`, sendErr.message);
+    }
+    addChatMessage(cleanPhone, { sender: "bot", text: newPendingOrder.summaryMessage, pushName });
+
+    // Registra o pedido no PDV com status "Em Análise" para a equipe conferir, editar se preciso e aprovar
+    registerOrderInPDV(newPendingOrder, cleanPhone);
+
+    // O bot encerra o atendimento automático inicial após completar o pedido
+    return;
+  }
+
+  // -------------------------------------------------------------
+  // CENÁRIO 3: Dúvida ou pedido incompleto -> Bot continua tirando dúvidas
+  // -------------------------------------------------------------
+  let replyMessage =
     aiResult.reply_text ||
     "Entendido! Me conta mais detalhes: qual o tamanho da marmita e se prefere entrega ou retirada?";
 
-  await sock.sendMessage(remoteJid, {
-    text: replyMessage,
-  });
+  try {
+    if (sock?.sendMessage) {
+      await sock.sendMessage(remoteJid, {
+        text: replyMessage,
+      });
+    }
+  } catch (sendErr) {
+    console.error(`[WhatsApp] Erro ao enviar resposta da IA para ${remoteJid}:`, sendErr.message);
+  }
+  addChatMessage(cleanPhone, { sender: "bot", text: replyMessage, pushName });
 }
 
 /**
@@ -557,22 +683,125 @@ async function handleCustomerDocument(remoteJid, msg, pushName) {
  * Função para simular mensagem de cliente para testes (usada pela interface e testes)
  */
 export async function simulateCustomerMessage(phone, messageText, pushName = "Cliente Teste") {
-  const remoteJid = `${phone.replace(/\D/g, "")}@s.whatsapp.net`;
+  const cleanPhone = phone.replace(/\D/g, "");
+  const remoteJid = `${cleanPhone}@s.whatsapp.net`;
+
+  // Registra a mensagem do cliente no chat
+  addChatMessage(cleanPhone, { sender: "customer", text: messageText, pushName });
+
   const result = await processCustomerMessageWithAI(remoteJid, messageText, pushName);
+
+  if (result.needs_human) {
+    const handoffMsg = result.reply_text || formatHumanHandoffMessage();
+    addChatMessage(cleanPhone, { sender: "bot", text: handoffMsg, pushName });
+    setChatStatus(cleanPhone, "needs_human", { customer_name: pushName });
+    addNotification({
+      type: "needs_human",
+      title: `🚨 Atendimento Humano: ${pushName}`,
+      message: result.needs_human_reason || "IA não conseguiu identificar o pedido ou cliente solicitou atendente",
+      phone: cleanPhone,
+      customer_name: pushName,
+    });
+
+    return {
+      ...result,
+      reply_text: handoffMsg,
+      needs_human: true,
+    };
+  }
 
   if (result.is_complete) {
     const pendingOrder = createPendingOrder(remoteJid, {
       ...result,
       customer_name: result.customer_name || pushName,
     });
+
+    // Registra a resposta do bot com o resumo no chat
+    addChatMessage(cleanPhone, { sender: "bot", text: pendingOrder.summaryMessage, pushName });
+
+    // Registra no PDV com status "Em Análise"
+    registerOrderInPDV(pendingOrder, cleanPhone);
+
     return {
       ...result,
       summaryMessage: pendingOrder.summaryMessage,
       orderCode: pendingOrder.orderCode,
+      reply_text: pendingOrder.summaryMessage,
     };
   }
 
-  return result;
+  // Resposta padrão da IA
+  let replyText = result.reply_text || "Como posso ajudar você com nossas marmitas?";
+  addChatMessage(cleanPhone, { sender: "bot", text: replyText, pushName });
+
+  return {
+    ...result,
+    reply_text: replyText,
+  };
+}
+
+/**
+ * Dispara notificação de status para o cliente no WhatsApp (Aprovado, Pronto, Em Entrega, Concluído)
+ */
+export async function notifyClientOrderStatus(phone, status, orderData) {
+  if (!phone) return { success: false, reason: "Telefone não informado" };
+
+  const cleanDigits = phone.replace(/\D/g, "");
+  let cleanNumber = cleanDigits;
+  if (!cleanNumber.startsWith("55") && cleanNumber.length <= 11) {
+    cleanNumber = `55${cleanNumber}`;
+  }
+  const jid = `${cleanNumber}@s.whatsapp.net`;
+
+  let messageText = "";
+
+  if (status === "Aprovado" || status === "Novo" || status === "Em Preparo") {
+    messageText = formatOrderApprovedMessage(orderData);
+  } else if (status === "Pronto") {
+    messageText = formatOrderReadyMessage(orderData);
+  } else if (status === "Em Entrega") {
+    messageText = formatOrderOutForDeliveryMessage(orderData);
+  } else if (status === "Concluído") {
+    messageText = formatOrderCompletedMessage(orderData);
+  }
+
+  if (!messageText) return { success: false, reason: "Status sem mensagem formatada" };
+
+  // Registra no chat daquele cliente
+  addChatMessage(cleanDigits, { sender: "bot", text: messageText, pushName: orderData.customer_name || "Cliente" });
+
+  // Se o socket do WhatsApp estiver conectado, envia para o WhatsApp real
+  if (sock && currentStatus === "connected") {
+    try {
+      await sock.sendMessage(jid, { text: messageText });
+      console.log(`[WhatsApp] Status "${status}" enviado com sucesso para ${jid}`);
+    } catch (err) {
+      console.warn(`[WhatsApp] Não foi possível enviar pelo socket para ${jid}:`, err.message);
+    }
+  }
+
+  return { success: true, message: messageText };
+}
+
+/**
+ * Envia mensagem manual de um atendente humano para o cliente via WhatsApp
+ */
+export async function sendManualChatMessage(phone, text, attendantName = "Atendente") {
+  const cleanDigits = phone.replace(/\D/g, "");
+  let cleanNumber = cleanDigits;
+  if (!cleanNumber.startsWith("55") && cleanNumber.length <= 11) {
+    cleanNumber = `55${cleanNumber}`;
+  }
+  const jid = `${cleanNumber}@s.whatsapp.net`;
+
+  // Registra no chat como enviado pelo atendente
+  addChatMessage(cleanDigits, { sender: "attendant", text, pushName: attendantName });
+
+  if (sock && currentStatus === "connected") {
+    await sock.sendMessage(jid, { text });
+  }
+
+  return { success: true, text };
 }
 
 /**
@@ -616,7 +845,8 @@ export async function simulatePixReceiptValidation(
 
   if (!targetOrder && cleanDigits) {
     try {
-      const res = await fetch(`http://localhost:3000/api/whatsapp/active-order?phone=${cleanDigits}`);
+      const port = process.env.PORT || 3000;
+      const res = await fetch(`http://127.0.0.1:${port}/api/whatsapp/active-order?phone=${cleanDigits}`);
       if (res.ok) {
         const data = await res.json();
         if (data && data.order) {
@@ -732,18 +962,7 @@ export function checkWhatsAppHealth() {
   } else {
     status = "disconnected";
     message = "WhatsApp inativo ou desconectado.";
-    console.log(`[WhatsApp - Monitor 5min] 🔴 Checagem #${totalHealthChecks}: WhatsApp INATIVO.`);
-
-    // Auto-recuperação: se tem credenciais salvas mas desconectou, tenta reconectar
-    const hasSession = fs.existsSync(AUTH_DIR) && fs.readdirSync(AUTH_DIR).length > 0;
-    if (hasSession && currentStatus === "disconnected") {
-      console.log("[WhatsApp - Monitor 5min] Sessão ativa detectada no disco. Tentando reconexão automática...");
-      try {
-        startWhatsAppBot();
-      } catch (err) {
-        console.error("[WhatsApp - Monitor 5min] Falha ao tentar reconectar automaticamente:", err.message);
-      }
-    }
+    console.log(`[WhatsApp - Monitor] Checagem #${totalHealthChecks}: WhatsApp desconectado.`);
   }
 
   const checkRecord = {
@@ -814,7 +1033,4 @@ export function startHealthCheckMonitor() {
 
   console.log("[WhatsApp] ⏱️ Monitor periódico ativo: verificando o status do WhatsApp a cada 5 minutos.");
 }
-
-// Inicia automaticamente o monitor ao inicializar
-startHealthCheckMonitor();
 

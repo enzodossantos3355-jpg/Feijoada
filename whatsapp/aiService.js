@@ -1,20 +1,23 @@
 import { GoogleGenAI, ThinkingLevel } from "@google/genai";
-import { AI_BEHAVIOR_PROMPT, STORE_SETTINGS } from "./config.js";
+import { AI_BEHAVIOR_PROMPT, STORE_SETTINGS, BOT_TAG, formatHumanHandoffMessage } from "./config.js";
 import { getPendingOrder, getConfirmedOrder } from "./orderService.js";
 import dotenv from "dotenv";
 
 dotenv.config();
 
-// Modelo principal com alta performance e estabilidade
-export const GEMINI_MODEL = "gemini-3.8-flash";
+// Modelo principal com altíssima performance, resposta instantânea e sem instabilidade
+export const GEMINI_MODEL = "gemini-3.5-flash-lite";
 
-// Lista de modelos Gemini Flash com fallback prioritário e tolerância a falhas
-const GEMINI_MODELS = ["gemini-3.8-flash", "gemini-flash-latest", "gemini-3.1-flash-lite"];
+// Lista de modelos Gemini Flash testados e ativos na API:
+const GEMINI_MODELS = [
+  "gemini-3.5-flash-lite",
+  "gemini-3.8-flash",
+];
 
 /**
  * Executa generateContent com fallback automático e timeout de segurança (evita travamentos)
  */
-async function generateWithModelFallback(client, payload, timeoutMs = 25000) {
+async function generateWithModelFallback(client, payload, timeoutMs = 15000) {
   let lastErr = null;
   for (const model of GEMINI_MODELS) {
     try {
@@ -35,7 +38,7 @@ async function generateWithModelFallback(client, payload, timeoutMs = 25000) {
       return { response: res, model };
     } catch (err) {
       lastErr = err;
-      console.warn(`[AI Service] Modelo ${model} falhou (${err.status || err.message}). Tentando fallback...`);
+      console.warn(`[AI Service] Modelo ${model} falhou (${err.status || err.message}). Tentando próximo modelo...`);
     }
   }
   throw lastErr;
@@ -81,20 +84,25 @@ export function clearChatHistory(userId) {
  * Busca o contexto atualizado do sistema (produtos, clientes, zonas, alta demanda, entrega programada)
  */
 export async function fetchSystemContext() {
-  try {
-    const res = await fetch("http://localhost:3000/api/whatsapp/catalog-context", {
-      signal: AbortSignal.timeout(2000),
-    });
-    if (res.ok) {
-      return await res.json();
+  const port = process.env.PORT || 3000;
+  for (const host of ["127.0.0.1", "localhost"]) {
+    try {
+      const res = await fetch(`http://${host}:${port}/api/whatsapp/catalog-context`, {
+        signal: AbortSignal.timeout(2000),
+      });
+      if (res.ok) {
+        return await res.json();
+      }
+    } catch {
+      // Tenta próximo host
     }
-  } catch {
-    // Fallback silencioso se o servidor estiver em boot
   }
 
   // Fallback padrão com dados estruturados
   return {
     accepting_orders: true,
+    is_caixa_open: true,
+    day_state: "open",
     high_demand_message: "Nossos pedidos estão temporariamente pausados por alta demanda.",
     scheduled_delivery_enabled: true,
     scheduled_delivery_fee: STORE_SETTINGS.scheduledDelivery.fee,
@@ -172,7 +180,7 @@ function matchRegisteredCustomer(rawPhone, customersList) {
 /**
  * Processa a mensagem do cliente com o Gemini Flash
  */
-export async function processCustomerMessageWithAI(userPhone, incomingMessage, pushName = "") {
+export async function processCustomerMessageWithAI(userPhone, incomingMessage, pushName = "", customContext = null) {
   const history = getChatHistory(userPhone);
   history.push({ role: "user", text: incomingMessage });
 
@@ -180,7 +188,7 @@ export async function processCustomerMessageWithAI(userPhone, incomingMessage, p
     history.splice(0, history.length - 16);
   }
 
-  const contextData = await fetchSystemContext();
+  const contextData = customContext || (await fetchSystemContext());
   const registeredCustomer = matchRegisteredCustomer(userPhone, contextData.customers);
 
   // Formatação do Cardápio real
@@ -238,6 +246,12 @@ REGRA MANDATÓRIA:
 • REGRA DO PIX: Sempre que o cliente pedir a chave Pix ("qual o pix?", "manda a chave", etc.) ou escolher pagar via Pix, envie a Chave Pix e o titular na sua resposta!`
     : "DADOS DO PIX: Chave Pix a ser informada no fechamento do pedido.";
 
+  const storeLocationPrompt = `LOCALIZAÇÃO E ENDEREÇO DO NEGÓCIO:
+• Endereço da loja / retirada: ${contextData.store_address || STORE_SETTINGS.address || "Rua do Sabor, 150 - Centro"}
+• Link do Google Maps: ${contextData.store_maps_url || STORE_SETTINGS.mapsUrl || ""}
+• Horário de funcionamento: ${contextData.business_hours || STORE_SETTINGS.businessHours || "Segunda a Sábado das 10h30 às 15h00 e das 18h00 às 22h00"}
+• REGRA DE LOCALIZAÇÃO: Se o cliente perguntar "onde fica?", "qual o endereço de vocês?", "posso retirar aí?", "como faço para buscar?", ou pedir a localização, informe com simpatia o endereço completo, o link do Google Maps e o horário de funcionamento!`;
+
   const systemInstruction = `
 ${customInstructionsPrompt}
 
@@ -257,6 +271,8 @@ ${customerPrompt}
 
 ${pixPrompt}
 
+${storeLocationPrompt}
+
 CARDÁPIO DE PRODUTOS CADASTRADOS NO APP:
 ${catalogPrompt}
 
@@ -272,6 +288,8 @@ Você DEVE responder ESTRITAMENTE em formato JSON com a seguinte estrutura:
 {
   "reply_text": "Texto natural da sua resposta para o cliente no WhatsApp",
   "is_complete": true ou false,
+  "needs_human": true ou false,
+  "needs_human_reason": "Motivo da transferência se needs_human for true",
   "customer_name": "Nome do cliente",
   "items": [
     {
@@ -290,10 +308,64 @@ Você DEVE responder ESTRITAMENTE em formato JSON com a seguinte estrutura:
   "estimated_total": 0.0
 }
 
-REGRAS DO "is_complete":
+REGRAS ESPECIAIS:
 - "is_complete" DEVE ser true assim que você tiver: prato/itens + endereço ou retirada + forma de pagamento!
+- O BOT SÓ DEVE ENCERRAR O ATENDIMENTO QUANDO O PEDIDO FOR COMPLETO ("is_complete": true). Enquanto faltar dados, continue conversando e tirando dúvidas!
+- "needs_human" DEVE ser true se:
+  1. O cliente pedir expressamente para falar com uma pessoa/humano/atendente ("falar com atendente", "quero falar com alguém", "humano", etc.).
+  2. A conversa estiver confusa, o cliente tiver reclamações graves, ou você não conseguir identificar os pratos desejados após tentativas.
+- Se "needs_human" for true, defina "needs_human_reason" com o motivo sucinto.
 - Se a loja estiver pausada por alta demanda, "is_complete" DEVE ser false.
 `;
+
+  // 0. REGRA MANDATÓRIA: CAIXA DO DIA FECHADO
+  // A IA só deve atender e só pode registrar pedidos com o caixa aberto!
+  const isCaixaOpen =
+    contextData.is_caixa_open !== false &&
+    contextData.day_state !== "closed";
+
+  if (!isCaixaOpen) {
+    const greeting = registeredCustomer?.name
+      ? `Olá, ${registeredCustomer.name}!`
+      : (pushName ? `Olá, ${pushName}!` : "Olá!");
+
+    const closedMessage = `${greeting} 😊\n\nNo momento o nosso *caixa está fechado* e não estamos recebendo pedidos. 🕒\n\n*Horário de funcionamento:* ${contextData.business_hours || STORE_SETTINGS.businessHours || "Segunda a Sábado das 10h30 às 15h00 e das 18h00 às 22h00"}\n${contextData.store_address ? `📍 *Endereço:* ${contextData.store_address}\n` : ""}Assim que o caixa for aberto no sistema da marmitaria, teremos o maior prazer em preparar o seu pedido! Se desejar consultar nosso cardápio ou tirar dúvidas, fique à vontade. 👍`;
+
+    history.push({ role: "model", text: closedMessage });
+    return {
+      reply_text: closedMessage,
+      is_complete: false,
+      needs_human: false,
+      items: [],
+      customer_name: registeredCustomer?.name || pushName || "Cliente",
+    };
+  }
+
+  // Detecção explícita e prioritária de solicitação de atendente humano
+  const lowerMsg = incomingMessage.toLowerCase().trim();
+  const wantsHuman =
+    lowerMsg.includes("falar com atendente") ||
+    lowerMsg.includes("falar com humano") ||
+    lowerMsg.includes("falar com pessoa") ||
+    lowerMsg.includes("quero atendente") ||
+    lowerMsg.includes("atendente humano") ||
+    lowerMsg === "atendente" ||
+    lowerMsg === "humano" ||
+    lowerMsg.includes("pessoa real") ||
+    lowerMsg.includes("atendente por favor");
+
+  if (wantsHuman) {
+    const handoffText = formatHumanHandoffMessage("Cliente solicitou atendimento humano");
+    history.push({ role: "model", text: handoffText });
+    return {
+      reply_text: handoffText,
+      is_complete: false,
+      needs_human: true,
+      needs_human_reason: "Cliente solicitou atendimento humano",
+      items: [],
+      customer_name: registeredCustomer?.name || pushName || "Cliente",
+    };
+  }
 
   const conversationContext = history
     .map((msg) => `${msg.role === "user" ? "Cliente" : "Atendente"}: ${msg.text}`)
@@ -321,6 +393,10 @@ REGRAS DO "is_complete":
 
       if (startIndex !== -1 && endIndex !== -1) {
         const parsed = JSON.parse(rawText.substring(startIndex, endIndex + 1));
+
+        if (parsed.needs_human) {
+          parsed.reply_text = formatHumanHandoffMessage(parsed.needs_human_reason || "Dificuldade na identificação do pedido");
+        }
 
         if (parsed.reply_text) {
           history.push({ role: "model", text: parsed.reply_text });
@@ -547,8 +623,32 @@ function smartFallbackResponse(history, incomingMessage, contextData, customer, 
   const name = customer ? customer.name : pushName ? pushName.split(" ")[0] : "";
   const nameGreeting = name ? `, ${name}` : "";
 
+  const wrapTag = (msg) => msg;
+
+  const isCaixaOpen =
+    contextData.is_caixa_open !== false &&
+    contextData.day_state !== "closed";
+
+  if (!isCaixaOpen) {
+    const raw = `Olá${nameGreeting}! 😊\n\nNo momento o nosso *caixa está fechado* e não estamos recebendo pedidos. 🕒\n\nHorário de atendimento: ${contextData.business_hours || STORE_SETTINGS.businessHours || "10h30 às 15h00 e das 18h00 às 22h00"}.\nAssim que o caixa for aberto, teremos o prazer em lhe atender! 👍`;
+    const msg = wrapTag(raw);
+    history.push({ role: "model", text: msg });
+    return {
+      reply_text: msg,
+      is_complete: false,
+      customer_name: name || "Cliente",
+      items: [],
+      delivery_type: "Entrega",
+      delivery_address: "",
+      payment_method: "Pendente",
+      notes: "",
+      estimated_total: 0,
+    };
+  }
+
   if (!contextData.accepting_orders) {
-    const msg = `Olá${nameGreeting}! 😊\n${contextData.high_demand_message}`;
+    const raw = `Olá${nameGreeting}! 😊\n${contextData.high_demand_message}`;
+    const msg = wrapTag(raw);
     history.push({ role: "model", text: msg });
     return {
       reply_text: msg,
@@ -565,25 +665,29 @@ function smartFallbackResponse(history, incomingMessage, contextData, customer, 
 
   // Cumprimentos simples
   if (text === "bom dia" || text.startsWith("bom dia")) {
-    const reply = `Bom dia${nameGreeting}! Tudo bem? Como posso te ajudar hoje? O que você gostaria de pedir? 🍲`;
+    const raw = `Bom dia${nameGreeting}! Tudo bem? Como posso te ajudar hoje? O que você gostaria de pedir? 🍲`;
+    const reply = wrapTag(raw);
     history.push({ role: "model", text: reply });
     return { reply_text: reply, is_complete: false, items: [], delivery_type: "Entrega" };
   }
 
   if (text === "boa tarde" || text.startsWith("boa tarde")) {
-    const reply = `Boa tarde${nameGreeting}! Tudo bem? O que você deseja pedir hoje no almoço? 🍛`;
+    const raw = `Boa tarde${nameGreeting}! Tudo bem? O que você deseja pedir hoje no almoço? 🍛`;
+    const reply = wrapTag(raw);
     history.push({ role: "model", text: reply });
     return { reply_text: reply, is_complete: false, items: [], delivery_type: "Entrega" };
   }
 
   if (text === "boa noite" || text.startsWith("boa noite")) {
-    const reply = `Boa noite${nameGreeting}! Tudo bem? O que você gostaria de pedir para o jantar hoje? 🍲`;
+    const raw = `Boa noite${nameGreeting}! Tudo bem? O que você gostaria de pedir para o jantar hoje? 🍲`;
+    const reply = wrapTag(raw);
     history.push({ role: "model", text: reply });
     return { reply_text: reply, is_complete: false, items: [], delivery_type: "Entrega" };
   }
 
   if (text === "oi" || text === "olá" || text === "ola" || text === "opa") {
-    const reply = `Olá${nameGreeting}! Tudo bem? Em que posso te ajudar hoje? Deseja ver o cardápio ou fazer um pedido? 😊`;
+    const raw = `Olá${nameGreeting}! Tudo bem? Em que posso te ajudar hoje? Deseja ver o cardápio ou fazer um pedido? 😊`;
+    const reply = wrapTag(raw);
     history.push({ role: "model", text: reply });
     return { reply_text: reply, is_complete: false, items: [], delivery_type: "Entrega" };
   }
@@ -592,9 +696,19 @@ function smartFallbackResponse(history, incomingMessage, contextData, customer, 
   if (text.includes("pix") || text.includes("chave")) {
     const pixKey = contextData.pix_key || "11999999999 (Celular)";
     const pixBenef = contextData.pix_beneficiary ? `\n*Titular:* ${contextData.pix_beneficiary}` : "";
-    const pixMsg = `Nossa chave Pix é:\n🔑 *${pixKey}*${pixBenef}\n\nAssim que você realizar a transferência, pode nos enviar o comprovante por aqui mesmo para validarmos! 👍`;
+    const pixMsg = wrapTag(`Nossa chave Pix é:\n🔑 *${pixKey}*${pixBenef}\n\nAssim que você realizar a transferência, pode nos enviar o comprovante por aqui mesmo para validarmos! 👍`);
     history.push({ role: "model", text: pixMsg });
     return { reply_text: pixMsg, is_complete: false, items: [], payment_method: "Pix" };
+  }
+
+  // Dúvidas sobre Localização / Endereço / Retirada
+  if (text.includes("onde fica") || text.includes("endereço") || text.includes("endereco") || text.includes("localização") || text.includes("localizacao") || text.includes("retirar aí") || text.includes("buscar no balcão") || text.includes("onde vocês")) {
+    const addr = contextData.store_address || STORE_SETTINGS.address || "Rua do Sabor, 150 - Centro, São Paulo - SP";
+    const maps = (contextData.store_maps_url || STORE_SETTINGS.mapsUrl) ? `\n🗺️ *Google Maps:* ${contextData.store_maps_url || STORE_SETTINGS.mapsUrl}` : "";
+    const hours = (contextData.business_hours || STORE_SETTINGS.businessHours) ? `\n⏰ *Horário:* ${contextData.business_hours || STORE_SETTINGS.businessHours}` : "";
+    const locMsg = wrapTag(`Nosso endereço é:\n📍 *${addr}*${maps}${hours}\n\nVocê pode retirar seu pedido no balcão ou pedir via delivery para sua casa ou trabalho! Como prefere? 😊`);
+    history.push({ role: "model", text: locMsg });
+    return { reply_text: locMsg, is_complete: false, items: [] };
   }
 
   // Dúvidas sobre Entrega Programada

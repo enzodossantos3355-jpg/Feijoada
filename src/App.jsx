@@ -11,6 +11,8 @@ import Produtos from "@/pages/Produtos";
 import Relatorios from "@/pages/Relatorios";
 import Configuracoes from "@/pages/Configuracoes";
 import Armazenamento from "@/pages/Armazenamento";
+import AtendimentoWhatsApp from "@/pages/AtendimentoWhatsApp";
+import Clientes from "@/pages/Clientes";
 
 function ProtectedRoute({ children }) {
   const { user, loading } = useAuth();
@@ -49,6 +51,8 @@ export default function App() {
           >
             <Route path="/dashboard" element={<Dashboard />} />
             <Route path="/pedidos" element={<Pedidos />} />
+            <Route path="/atendimento" element={<AtendimentoWhatsApp />} />
+            <Route path="/clientes" element={<Clientes />} />
             <Route path="/produtos" element={<Produtos />} />
             <Route path="/relatorios" element={<Relatorios />} />
             <Route path="/configuracoes" element={<Configuracoes />} />
