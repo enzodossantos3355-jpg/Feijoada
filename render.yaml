@@ -9,7 +9,7 @@ services:
     buildCommand: npm install --legacy-peer-deps && npm run build
     startCommand: npm start
     autoDeploy: true
-    healthCheckPath: /api/whatsapp/status
+    healthCheckPath: /health
     envVars:
       - key: NODE_ENV
         value: production

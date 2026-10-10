@@ -511,9 +511,18 @@ function createToken(userId: string, email: string): string {
 // ---------------- API Routes ----------------
 const apiRouter = express.Router();
 
-// Root check
+// Root & Health check
 apiRouter.get("/", (_req, res) => {
-  res.json({ message: "API Marmitaria Online" });
+  res.json({ message: "API Marmitaria Online", status: "ok" });
+});
+
+apiRouter.get("/health", (_req, res) => {
+  res.json({ status: "healthy", timestamp: new Date().toISOString() });
+});
+
+// Direct root health endpoint for Render or monitoring services
+app.get("/health", (_req, res) => {
+  res.json({ status: "healthy", timestamp: new Date().toISOString() });
 });
 
 // ---------------- Store Status & High Demand & WhatsApp ----------------
