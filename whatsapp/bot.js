@@ -63,6 +63,31 @@ let disconnectDueToConflict = false;
 let onOrderConfirmedCallback = null;
 
 /**
+ * Força a reconexão imediata do WhatsApp limpando bloqueios
+ */
+export async function forceReconnectWhatsApp() {
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  disconnectDueToConflict = false;
+  isStartingBot = false;
+  currentStatus = "disconnected";
+  try {
+    if (sock) {
+      try {
+        sock.ev?.removeAllListeners();
+        sock.ws?.close();
+      } catch {}
+      sock = null;
+    }
+  } catch (e) {
+    console.warn("[WhatsApp] Erro ao redefinir socket:", e);
+  }
+  return await startWhatsAppBot();
+}
+
+/**
  * Registra um callback para quando um pedido for confirmado via WhatsApp
  */
 export function setOrderConfirmedCallback(callback) {
@@ -963,6 +988,15 @@ export function checkWhatsAppHealth() {
     status = "disconnected";
     message = "WhatsApp inativo ou desconectado.";
     console.log(`[WhatsApp - Monitor] Checagem #${totalHealthChecks}: WhatsApp desconectado.`);
+
+    // Auto-reconectar se houver sessão de autenticação salva
+    const hasSessionFiles = fs.existsSync(AUTH_DIR) && fs.readdirSync(AUTH_DIR).length > 0;
+    if (hasSessionFiles && !isStartingBot) {
+      console.log("[WhatsApp - Monitor] Sessão salva detectada. Forçando auto-reconexão do WhatsApp...");
+      startWhatsAppBot().catch((err) =>
+        console.warn("[WhatsApp - Monitor] Tentativa de auto-reconexão falhou:", err.message)
+      );
+    }
   }
 
   const checkRecord = {

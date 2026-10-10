@@ -155,6 +155,31 @@ export default function AtendimentoWhatsApp() {
     }
   };
 
+  const handleRejectOrder = async (orderId) => {
+    if (!orderId || !window.confirm("Deseja realmente RECUSAR este pedido?")) return;
+    try {
+      await api.patch(`/orders/${orderId}/status`, { status: "Cancelado" });
+      toast.info("Pedido recusado.");
+      await loadChatDetails(selectedChatId);
+      await loadChats();
+    } catch {
+      toast.error("Erro ao recusar pedido");
+    }
+  };
+
+  const handleDeleteOrder = async (orderId) => {
+    if (!orderId || !window.confirm("Tem certeza que deseja EXCLUIR este pedido permanentemente?")) return;
+    try {
+      await api.delete(`/orders/${orderId}`);
+      toast.success("Pedido excluído!");
+      setEditOrderOpen(false);
+      await loadChatDetails(selectedChatId);
+      await loadChats();
+    } catch {
+      toast.error("Erro ao excluir pedido");
+    }
+  };
+
   const handleSimulateMessage = async (e) => {
     e.preventDefault();
     try {
@@ -204,6 +229,17 @@ export default function AtendimentoWhatsApp() {
       const res = await api.post("/whatsapp/simulate-qr");
       setWaStatus((prev) => ({ ...prev, qr_code: res.data.qr_code, status: "qr_ready" }));
       toast.success("QR Code gerado para pareamento!");
+    }
+  };
+
+  const handleForceReconnect = async () => {
+    try {
+      toast.info("Solicitando reconexão forçada do WhatsApp...");
+      await api.post("/whatsapp/force-reconnect");
+      toast.success("Comando enviado! Reconectando ao WhatsApp...");
+      setTimeout(loadChats, 2000);
+    } catch {
+      toast.error("Erro ao solicitar reconexão do WhatsApp");
     }
   };
 
@@ -260,6 +296,16 @@ export default function AtendimentoWhatsApp() {
           >
             {isConnected ? <WifiHigh size={16} weight="bold" /> : <QrCode size={16} weight="bold" />}
             <span>{isConnected ? "WhatsApp Conectado" : "Ver QR Code WhatsApp"}</span>
+          </Button>
+
+          <Button
+            variant="outline"
+            onClick={handleForceReconnect}
+            title="Força a re-inicialização da conexão do WhatsApp caso caia ou trave"
+            className="text-xs gap-1 text-[#C5533B] border-stone-300 hover:bg-stone-50 font-medium"
+          >
+            <ArrowsClockwise size={15} weight="bold" />
+            <span>Forçar Conexão</span>
           </Button>
 
           <Button
@@ -554,17 +600,36 @@ export default function AtendimentoWhatsApp() {
                       }}
                       className="text-xs h-7 text-stone-700 hover:text-stone-900 gap-1"
                     >
-                      <PencilSimple size={14} /> Editar Dados
+                      <PencilSimple size={14} /> Editar
                     </Button>
                     {currentChat.latest_order.status === "Em Análise" && (
-                      <Button
-                        size="sm"
-                        onClick={() => handleApproveOrder(currentChat.latest_order.order_id)}
-                        className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs h-7"
-                      >
-                        Aprovar & Avisar Cliente
-                      </Button>
+                      <>
+                        <Button
+                          size="sm"
+                          onClick={() => handleApproveOrder(currentChat.latest_order.order_id)}
+                          className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs h-7 font-semibold"
+                        >
+                          Aprovar
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => handleRejectOrder(currentChat.latest_order.order_id)}
+                          className="border-red-200 text-red-600 hover:bg-red-50 text-xs h-7 font-semibold"
+                        >
+                          Recusar
+                        </Button>
+                      </>
                     )}
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => handleDeleteOrder(currentChat.latest_order.order_id)}
+                      className="text-red-500 hover:bg-red-50 text-xs h-7"
+                      title="Excluir Pedido"
+                    >
+                      Excluir
+                    </Button>
                   </div>
                 </div>
               )}
@@ -824,37 +889,53 @@ export default function AtendimentoWhatsApp() {
       {/* Modal para Editar Pedido Vinculado */}
       {editingOrder && (
         <Dialog open={editOrderOpen} onOpenChange={setEditOrderOpen}>
-          <DialogContent className="max-w-lg">
+          <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto bg-[#F9F8F6]">
             <DialogHeader>
-              <DialogTitle className="text-stone-900 font-display">
-                Editar Pedido #{editingOrder.order_id.slice(-6)}
+              <DialogTitle className="text-stone-900 font-display font-bold flex items-center justify-between">
+                <span>Editar Pedido #{editingOrder.order_id.slice(-6)}</span>
+                <Badge variant="outline" className="text-xs">
+                  {editingOrder.status}
+                </Badge>
               </DialogTitle>
             </DialogHeader>
 
-            <div className="space-y-4 max-h-[65vh] overflow-y-auto pr-1">
-              <div>
-                <Label className="text-xs text-stone-600">Nome do Cliente</Label>
-                <Input
-                  value={editingOrder.customer_name || ""}
-                  onChange={(e) =>
-                    setEditingOrder({ ...editingOrder, customer_name: e.target.value })
-                  }
-                  className="mt-1 text-xs"
-                />
+            <div className="space-y-4 py-1 text-xs">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <Label className="text-xs text-stone-700 font-semibold">Nome do Cliente</Label>
+                  <Input
+                    value={editingOrder.customer_name || ""}
+                    onChange={(e) =>
+                      setEditingOrder({ ...editingOrder, customer_name: e.target.value })
+                    }
+                    className="mt-1 text-xs bg-white"
+                  />
+                </div>
+
+                <div>
+                  <Label className="text-xs text-stone-700 font-semibold">Status do Pedido</Label>
+                  <Input
+                    value={editingOrder.status || "Novo"}
+                    onChange={(e) =>
+                      setEditingOrder({ ...editingOrder, status: e.target.value })
+                    }
+                    className="mt-1 text-xs bg-white"
+                  />
+                </div>
               </div>
 
               <div>
-                <Label className="text-xs text-stone-600">Endereço de Entrega</Label>
+                <Label className="text-xs text-stone-700 font-semibold">Endereço de Entrega</Label>
                 <Input
                   value={editingOrder.address || ""}
                   onChange={(e) => setEditingOrder({ ...editingOrder, address: e.target.value })}
-                  className="mt-1 text-xs"
+                  className="mt-1 text-xs bg-white"
                 />
               </div>
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <Label className="text-xs text-stone-600">Taxa de Entrega (R$)</Label>
+                  <Label className="text-xs text-stone-700 font-semibold">Taxa de Entrega (R$)</Label>
                   <Input
                     type="number"
                     step="0.5"
@@ -862,55 +943,119 @@ export default function AtendimentoWhatsApp() {
                     onChange={(e) =>
                       setEditingOrder({ ...editingOrder, delivery_fee: Number(e.target.value) })
                     }
-                    className="mt-1 text-xs"
+                    className="mt-1 text-xs bg-white"
                   />
                 </div>
                 <div>
-                  <Label className="text-xs text-stone-600">Forma de Pagamento</Label>
+                  <Label className="text-xs text-stone-700 font-semibold">Forma de Pagamento</Label>
                   <Input
                     value={editingOrder.payment_method || ""}
                     onChange={(e) =>
                       setEditingOrder({ ...editingOrder, payment_method: e.target.value })
                     }
-                    className="mt-1 text-xs"
+                    className="mt-1 text-xs bg-white"
                   />
                 </div>
               </div>
 
               <div>
-                <Label className="text-xs text-stone-600">Observações do Pedido</Label>
+                <Label className="text-xs text-stone-700 font-semibold">Observações do Pedido</Label>
                 <Input
                   value={editingOrder.notes || ""}
                   onChange={(e) => setEditingOrder({ ...editingOrder, notes: e.target.value })}
-                  className="mt-1 text-xs"
+                  className="mt-1 text-xs bg-white"
                 />
               </div>
 
-              <div>
-                <Label className="text-xs text-stone-600 font-semibold">Itens Anotados</Label>
-                <div className="space-y-2 mt-1.5 border p-2.5 rounded-lg bg-stone-50">
-                  {editingOrder.items?.map((it, idx) => (
-                    <div key={idx} className="flex items-center justify-between text-xs">
-                      <span>
-                        {it.quantity}x {it.name}
-                      </span>
-                      <span className="font-semibold">{BRL(it.price * it.quantity)}</span>
+              {/* Gerenciador de Itens Anotados */}
+              <div className="space-y-2 border p-3 rounded-xl bg-white border-stone-200">
+                <div className="flex items-center justify-between pb-1 border-b border-stone-100">
+                  <Label className="text-xs text-stone-900 font-bold uppercase tracking-wider">
+                    Itens Anotados no WhatsApp ({editingOrder.items?.length || 0})
+                  </Label>
+                  <span className="text-xs font-bold text-stone-900 font-display">
+                    Total: {BRL((editingOrder.items || []).reduce((acc, i) => acc + (i.price * i.quantity), 0) + (editingOrder.delivery_fee || 0))}
+                  </span>
+                </div>
+
+                <div className="space-y-1.5 max-h-40 overflow-y-auto">
+                  {(editingOrder.items || []).map((it, idx) => (
+                    <div key={idx} className="flex items-center justify-between bg-stone-50 p-2 rounded-lg border border-stone-200">
+                      <div className="flex-1 pr-2">
+                        <span className="font-semibold text-stone-800 text-xs">{it.name}</span>
+                        <div className="text-[11px] text-stone-500">
+                          {BRL(it.price)} un. • Total: <strong className="text-stone-900">{BRL(it.price * it.quantity)}</strong>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-1 shrink-0">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="icon"
+                          className="h-6 w-6 text-stone-700"
+                          onClick={() => {
+                            const newItems = editingOrder.items.map((item, i) =>
+                              i === idx ? { ...item, quantity: Math.max(1, item.quantity - 1) } : item
+                            );
+                            setEditingOrder({ ...editingOrder, items: newItems });
+                          }}
+                        >
+                          -
+                        </Button>
+                        <span className="font-bold text-xs w-4 text-center">{it.quantity}</span>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="icon"
+                          className="h-6 w-6 text-stone-700"
+                          onClick={() => {
+                            const newItems = editingOrder.items.map((item, i) =>
+                              i === idx ? { ...item, quantity: item.quantity + 1 } : item
+                            );
+                            setEditingOrder({ ...editingOrder, items: newItems });
+                          }}
+                        >
+                          +
+                        </Button>
+                      </div>
                     </div>
                   ))}
                 </div>
               </div>
             </div>
 
-            <DialogFooter className="gap-2">
-              <Button variant="outline" onClick={() => setEditOrderOpen(false)}>
-                Cancelar
-              </Button>
-              <Button
-                onClick={handleSaveEditedOrder}
-                className="bg-[#C5533B] hover:bg-[#A9432D] text-white"
-              >
-                Salvar Alterações
-              </Button>
+            <DialogFooter className="flex flex-col sm:flex-row items-center justify-between gap-2 pt-2 border-t border-stone-200">
+              <div className="flex items-center gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => handleRejectOrder(editingOrder.order_id)}
+                  className="text-red-600 border-red-200 hover:bg-red-50 text-xs"
+                >
+                  Recusar Pedido
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  onClick={() => handleDeleteOrder(editingOrder.order_id)}
+                  className="text-red-500 hover:bg-red-50 text-xs"
+                >
+                  Excluir
+                </Button>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <Button variant="outline" onClick={() => setEditOrderOpen(false)}>
+                  Cancelar
+                </Button>
+                <Button
+                  onClick={handleSaveEditedOrder}
+                  className="bg-[#C5533B] hover:bg-[#A9432D] text-white"
+                >
+                  Salvar Alterações
+                </Button>
+              </div>
             </DialogFooter>
           </DialogContent>
         </Dialog>

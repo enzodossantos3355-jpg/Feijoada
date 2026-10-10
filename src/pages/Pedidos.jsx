@@ -12,8 +12,20 @@ import {
   Plus, Printer, MagnifyingGlass, ShoppingBag,
   X, WhatsappLogo, ArrowRight, Check, PencilSimple,
   LockKey, LockKeyOpen, CookingPot, CaretDown, CaretUp,
-  Clock, CheckCircle, Warning
+  Clock, CheckCircle, Warning, DotsThreeVertical, Trash,
+  Copy, Archive, PaperPlaneTilt
 } from "@phosphor-icons/react";
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuLabel,
+  DropdownMenuSub,
+  DropdownMenuSubTrigger,
+  DropdownMenuSubContent
+} from "@/components/ui/dropdown-menu";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import PaymentIcon, { PaymentBadge } from "@/components/PaymentIcon";
 import { printReceipt } from "@/lib/print";
@@ -127,6 +139,46 @@ export default function Pedidos() {
       );
     } catch {
       toast.error("Erro ao aprovar pedido");
+    }
+  };
+
+  const handleDeleteOrder = async (orderId) => {
+    if (!window.confirm("Tem certeza que deseja excluir este pedido permanentemente?")) return;
+    try {
+      await api.delete(`/orders/${orderId}`);
+      toast.success("Pedido excluído com sucesso!");
+      setOrders((prev) => prev.filter((o) => o.order_id !== orderId));
+    } catch {
+      toast.error("Erro ao excluir pedido");
+    }
+  };
+
+  const handleCopyOrderSummary = (ord) => {
+    const text = `📋 *PEDIDO #${ord.order_id.replace("ord_", "").toUpperCase()}*\n👤 Cliente: ${ord.customer_name}\n📞 Tel: ${ord.customer_phone || "Não informado"}\n📍 Endereço: ${ord.address || "Retirada"}\n📦 Tipo: ${ord.delivery_type}\n💳 Pagamento: ${ord.payment_method}\n\n*ITENS:*\n${(ord.items || []).map(i => `• ${i.quantity}x ${i.name} - R$ ${(i.price * i.quantity).toFixed(2)}`).join("\n")}\n\n💰 *Total: ${BRL(ord.total || 0)}*`;
+    navigator.clipboard.writeText(text);
+    toast.success("Resumo do pedido copiado para a área de transferência!");
+  };
+
+  const handleResendWhatsAppNotification = async (ord) => {
+    if (!ord.customer_phone) {
+      toast.error("Cliente sem telefone cadastrado para WhatsApp");
+      return;
+    }
+    try {
+      await api.patch(`/orders/${ord.order_id}/status`, { status: ord.status });
+      toast.success(`Notificação de status "${ord.status}" reenviada para o cliente no WhatsApp!`);
+    } catch {
+      toast.error("Erro ao reenviar notificação");
+    }
+  };
+
+  const handleArchiveOrder = async (orderId) => {
+    try {
+      await api.patch(`/orders/${orderId}/archive`);
+      toast.success("Pedido arquivado com sucesso!");
+      setOrders((prev) => prev.filter((o) => o.order_id !== orderId));
+    } catch {
+      toast.error("Erro ao arquivar pedido");
     }
   };
 
@@ -636,6 +688,89 @@ export default function Pedidos() {
                           Cancelar
                         </Button>
                       )}
+
+                      {/* Menu 3 Pontinhos (Ações Completas do Pedido) */}
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button
+                            variant="outline"
+                            size="icon"
+                            className="h-8 w-8 text-stone-700 hover:bg-stone-100"
+                            title="Opções do Pedido"
+                          >
+                            <DotsThreeVertical size={20} weight="bold" />
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end" className="w-52">
+                          <DropdownMenuLabel>Ações do Pedido #{ord.order_id.slice(-6)}</DropdownMenuLabel>
+                          
+                          <DropdownMenuSub>
+                            <DropdownMenuSubTrigger className="gap-2">
+                              <ArrowRight size={14} />
+                              <span>Mudar Status</span>
+                            </DropdownMenuSubTrigger>
+                            <DropdownMenuSubContent className="w-44">
+                              {["Em Análise", "Novo", "Em Preparo", "Pronto", "Em Entrega", "Concluído", "Cancelado"].map((st) => (
+                                <DropdownMenuItem
+                                  key={st}
+                                  onClick={() => handleUpdateStatus(ord.order_id, st)}
+                                  className={`gap-2 text-xs ${ord.status === st ? "font-bold text-[#C5533B]" : ""}`}
+                                >
+                                  {ord.status === st ? "✓ " : ""}{st}
+                                </DropdownMenuItem>
+                              ))}
+                            </DropdownMenuSubContent>
+                          </DropdownMenuSub>
+
+                          <DropdownMenuItem
+                            onClick={() => {
+                              setEditingOrder({ ...ord });
+                              setEditOrderOpen(true);
+                            }}
+                            className="gap-2"
+                          >
+                            <PencilSimple size={14} />
+                            <span>Editar Detalhes</span>
+                          </DropdownMenuItem>
+
+                          <DropdownMenuItem onClick={() => printReceipt(ord)} className="gap-2">
+                            <Printer size={14} />
+                            <span>Imprimir Comprovante</span>
+                          </DropdownMenuItem>
+
+                          <DropdownMenuItem onClick={() => handleCopyOrderSummary(ord)} className="gap-2">
+                            <Copy size={14} />
+                            <span>Copiar Resumo</span>
+                          </DropdownMenuItem>
+
+                          <DropdownMenuItem onClick={() => navigate("/atendimento")} className="gap-2">
+                            <WhatsappLogo size={14} className="text-emerald-600" />
+                            <span>Ver Chat no WhatsApp</span>
+                          </DropdownMenuItem>
+
+                          {ord.customer_phone && (
+                            <DropdownMenuItem onClick={() => handleResendWhatsAppNotification(ord)} className="gap-2">
+                              <PaperPlaneTilt size={14} className="text-blue-600" />
+                              <span>Reenviar WhatsApp</span>
+                            </DropdownMenuItem>
+                          )}
+
+                          <DropdownMenuItem onClick={() => handleArchiveOrder(ord.order_id)} className="gap-2">
+                            <Archive size={14} />
+                            <span>Arquivar Pedido</span>
+                          </DropdownMenuItem>
+
+                          <DropdownMenuSeparator />
+
+                          <DropdownMenuItem
+                            onClick={() => handleDeleteOrder(ord.order_id)}
+                            className="gap-2 text-red-600 focus:text-red-700 focus:bg-red-50 font-semibold"
+                          >
+                            <Trash size={14} />
+                            <span>Excluir Pedido</span>
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
                     </div>
                   </div>
                 </CardContent>
@@ -645,60 +780,96 @@ export default function Pedidos() {
         </div>
       )}
 
-      {/* Modal Editar Pedido */}
+      {/* Modal Editar Pedido Completo */}
       {editingOrder && (
         <Dialog open={editOrderOpen} onOpenChange={setEditOrderOpen}>
-          <DialogContent className="max-w-md">
+          <DialogContent className="max-w-xl max-h-[90vh] overflow-y-auto bg-[#F9F8F6]">
             <DialogHeader>
-              <DialogTitle>Editar Pedido #{editingOrder.order_id.slice(-6)}</DialogTitle>
+              <DialogTitle className="font-display font-bold text-lg text-stone-900 flex items-center justify-between">
+                <span>Editar Pedido #{editingOrder.order_id.slice(-6)}</span>
+                <Badge className={STATUS_STYLES[editingOrder.status] || "bg-stone-100"}>
+                  {editingOrder.status}
+                </Badge>
+              </DialogTitle>
             </DialogHeader>
 
-            <form onSubmit={handleSaveEditedOrder} className="space-y-4">
-              <div>
-                <Label className="text-xs text-stone-600">Nome do Cliente</Label>
-                <Input
-                  value={editingOrder.customer_name || ""}
-                  onChange={(e) => setEditingOrder({ ...editingOrder, customer_name: e.target.value })}
-                  className="mt-1"
-                />
-              </div>
-
-              <div>
-                <Label className="text-xs text-stone-600">Telefone / WhatsApp</Label>
-                <Input
-                  value={editingOrder.customer_phone || ""}
-                  onChange={(e) => setEditingOrder({ ...editingOrder, customer_phone: e.target.value })}
-                  className="mt-1"
-                />
-              </div>
-
-              <div>
-                <Label className="text-xs text-stone-600">Endereço de Entrega</Label>
-                <Input
-                  value={editingOrder.address || ""}
-                  onChange={(e) => setEditingOrder({ ...editingOrder, address: e.target.value })}
-                  className="mt-1"
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
+            <form onSubmit={handleSaveEditedOrder} className="space-y-4 py-1 text-xs">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
-                  <Label className="text-xs text-stone-600">Taxa de Entrega (R$)</Label>
+                  <Label className="text-xs text-stone-700 font-semibold">Nome do Cliente</Label>
                   <Input
-                    type="number"
-                    step="0.5"
-                    value={editingOrder.delivery_fee || 0}
-                    onChange={(e) => setEditingOrder({ ...editingOrder, delivery_fee: Number(e.target.value) })}
-                    className="mt-1"
+                    value={editingOrder.customer_name || ""}
+                    onChange={(e) => setEditingOrder({ ...editingOrder, customer_name: e.target.value })}
+                    className="mt-1 bg-white border-stone-300"
                   />
                 </div>
+
                 <div>
-                  <Label className="text-xs text-stone-600">Forma de Pagamento</Label>
+                  <Label className="text-xs text-stone-700 font-semibold">Telefone / WhatsApp</Label>
+                  <Input
+                    value={editingOrder.customer_phone || ""}
+                    onChange={(e) => setEditingOrder({ ...editingOrder, customer_phone: e.target.value })}
+                    className="mt-1 bg-white border-stone-300"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <Label className="text-xs text-stone-700 font-semibold">Tipo de Atendimento</Label>
+                  <Select
+                    value={editingOrder.delivery_type || "Entrega"}
+                    onValueChange={(val) => setEditingOrder({ ...editingOrder, delivery_type: val })}
+                  >
+                    <SelectTrigger className="mt-1 bg-white border-stone-300"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="Entrega">Entrega (Delivery)</SelectItem>
+                      <SelectItem value="Retirada">Retirada no Balcão</SelectItem>
+                      <SelectItem value="Entrega Programada">Entrega Programada</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div>
+                  <Label className="text-xs text-stone-700 font-semibold">Status do Pedido</Label>
+                  <Select
+                    value={editingOrder.status || "Novo"}
+                    onValueChange={(val) => setEditingOrder({ ...editingOrder, status: val })}
+                  >
+                    <SelectTrigger className="mt-1 bg-white border-stone-300"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="Em Análise">⏳ Em Análise</SelectItem>
+                      <SelectItem value="Novo">🔵 Novo</SelectItem>
+                      <SelectItem value="Em Preparo">🟡 Em Preparo</SelectItem>
+                      <SelectItem value="Pronto">🟢 Pronto</SelectItem>
+                      <SelectItem value="Em Entrega">🛵 Em Entrega</SelectItem>
+                      <SelectItem value="Concluído">✅ Concluído</SelectItem>
+                      <SelectItem value="Cancelado">🔴 Cancelado / Recusado</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+
+              {editingOrder.delivery_type !== "Retirada" && (
+                <div>
+                  <Label className="text-xs text-stone-700 font-semibold">Endereço de Entrega</Label>
+                  <Input
+                    value={editingOrder.address || ""}
+                    onChange={(e) => setEditingOrder({ ...editingOrder, address: e.target.value })}
+                    placeholder="Rua, número, complemento, bairro"
+                    className="mt-1 bg-white border-stone-300"
+                  />
+                </div>
+              )}
+
+              <div className="grid grid-cols-3 gap-3">
+                <div>
+                  <Label className="text-xs text-stone-700 font-semibold">Forma de Pagamento</Label>
                   <Select
                     value={editingOrder.payment_method || "Pix"}
                     onValueChange={(val) => setEditingOrder({ ...editingOrder, payment_method: val })}
                   >
-                    <SelectTrigger className="mt-1"><SelectValue /></SelectTrigger>
+                    <SelectTrigger className="mt-1 bg-white border-stone-300"><SelectValue /></SelectTrigger>
                     <SelectContent>
                       <SelectItem value="Pix">Pix</SelectItem>
                       <SelectItem value="Dinheiro">Dinheiro</SelectItem>
@@ -708,22 +879,190 @@ export default function Pedidos() {
                     </SelectContent>
                   </Select>
                 </div>
+
+                <div>
+                  <Label className="text-xs text-stone-700 font-semibold">Taxa Entrega (R$)</Label>
+                  <Input
+                    type="number"
+                    step="0.5"
+                    value={editingOrder.delivery_fee || 0}
+                    onChange={(e) => setEditingOrder({ ...editingOrder, delivery_fee: Number(e.target.value) })}
+                    className="mt-1 bg-white border-stone-300"
+                  />
+                </div>
+
+                <div>
+                  <Label className="text-xs text-stone-700 font-semibold">Desconto (R$)</Label>
+                  <Input
+                    type="number"
+                    step="0.5"
+                    value={editingOrder.discount || 0}
+                    onChange={(e) => setEditingOrder({ ...editingOrder, discount: Number(e.target.value) })}
+                    className="mt-1 bg-white border-stone-300"
+                  />
+                </div>
+              </div>
+
+              {/* Gerenciador de Itens do Pedido */}
+              <div className="space-y-2 border p-3 rounded-xl bg-white border-stone-200">
+                <div className="flex items-center justify-between pb-1 border-b border-stone-100">
+                  <Label className="text-xs text-stone-900 font-bold uppercase tracking-wider">
+                    Itens e Cardápio do Pedido ({editingOrder.items?.length || 0})
+                  </Label>
+                  <span className="text-xs font-bold text-stone-900 font-display">
+                    Total: {BRL((editingOrder.items || []).reduce((acc, i) => acc + (i.price * i.quantity), 0) + (editingOrder.delivery_fee || 0) - (editingOrder.discount || 0))}
+                  </span>
+                </div>
+
+                {/* Lista de Itens Existentes */}
+                <div className="space-y-1.5 max-h-40 overflow-y-auto pr-1">
+                  {(editingOrder.items || []).map((it, idx) => (
+                    <div key={idx} className="flex items-center justify-between bg-stone-50 p-2 rounded-lg border border-stone-200">
+                      <div className="flex-1 pr-2">
+                        <span className="font-semibold text-stone-800 text-xs">{it.name}</span>
+                        <div className="text-[11px] text-stone-500">
+                          {BRL(it.price)} un. • Subtotal: <strong className="text-stone-900">{BRL(it.price * it.quantity)}</strong>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="icon"
+                          className="h-6 w-6 text-stone-700"
+                          onClick={() => {
+                            const newItems = editingOrder.items.map((item, i) =>
+                              i === idx ? { ...item, quantity: Math.max(1, item.quantity - 1) } : item
+                            );
+                            setEditingOrder({ ...editingOrder, items: newItems });
+                          }}
+                        >
+                          -
+                        </Button>
+
+                        <span className="font-bold text-xs w-4 text-center">{it.quantity}</span>
+
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="icon"
+                          className="h-6 w-6 text-stone-700"
+                          onClick={() => {
+                            const newItems = editingOrder.items.map((item, i) =>
+                              i === idx ? { ...item, quantity: item.quantity + 1 } : item
+                            );
+                            setEditingOrder({ ...editingOrder, items: newItems });
+                          }}
+                        >
+                          +
+                        </Button>
+
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="h-6 w-6 text-red-500 hover:text-red-700 hover:bg-red-50"
+                          onClick={() => {
+                            const newItems = editingOrder.items.filter((_, i) => i !== idx);
+                            setEditingOrder({ ...editingOrder, items: newItems });
+                          }}
+                          title="Remover item"
+                        >
+                          <Trash size={14} />
+                        </Button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Adicionar Pratos ao Pedido */}
+                <div className="pt-2 border-t border-stone-100">
+                  <Label className="text-[11px] text-stone-500 font-semibold block mb-1">
+                    Adicionar Prato do Cardápio:
+                  </Label>
+                  <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto">
+                    {products.map((p) => (
+                      <Button
+                        key={p.product_id}
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="text-[11px] h-7 bg-stone-50 hover:bg-stone-100"
+                        onClick={() => {
+                          const existing = (editingOrder.items || []).find((it) => it.product_id === p.product_id || it.name === p.name);
+                          if (existing) {
+                            const newItems = editingOrder.items.map((it) =>
+                              it.product_id === p.product_id || it.name === p.name
+                                ? { ...it, quantity: it.quantity + 1 }
+                                : it
+                            );
+                            setEditingOrder({ ...editingOrder, items: newItems });
+                          } else {
+                            const newItems = [
+                              ...(editingOrder.items || []),
+                              { product_id: p.product_id, name: p.name, price: p.price, quantity: 1, additionals: [] },
+                            ];
+                            setEditingOrder({ ...editingOrder, items: newItems });
+                          }
+                          toast.info(`Item "+ ${p.name}" adicionado!`);
+                        }}
+                      >
+                        + {p.name} ({BRL(p.price)})
+                      </Button>
+                    ))}
+                  </div>
+                </div>
               </div>
 
               <div>
-                <Label className="text-xs text-stone-600">Observações</Label>
+                <Label className="text-xs text-stone-700 font-semibold">Observações / Guarnições</Label>
                 <Input
                   value={editingOrder.notes || ""}
                   onChange={(e) => setEditingOrder({ ...editingOrder, notes: e.target.value })}
-                  className="mt-1"
+                  placeholder="Ex: sem cebola, feijão por cima"
+                  className="mt-1 bg-white border-stone-300"
                 />
               </div>
 
-              <DialogFooter className="gap-2">
-                <Button type="button" variant="outline" onClick={() => setEditOrderOpen(false)}>
-                  Cancelar
-                </Button>
-                <Button type="submit">Salvar Alterações</Button>
+              <DialogFooter className="flex flex-col sm:flex-row items-center justify-between gap-2 pt-2 border-t border-stone-200">
+                <div className="flex items-center gap-2 w-full sm:w-auto">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => {
+                      if (window.confirm("Deseja RECUSAR / CANCELAR este pedido?")) {
+                        handleUpdateStatus(editingOrder.order_id, "Cancelado");
+                        setEditOrderOpen(false);
+                      }
+                    }}
+                    className="text-red-600 border-red-200 hover:bg-red-50 text-xs gap-1 font-semibold"
+                  >
+                    <X size={15} /> Recusar Pedido
+                  </Button>
+
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    onClick={() => {
+                      handleDeleteOrder(editingOrder.order_id);
+                      setEditOrderOpen(false);
+                    }}
+                    className="text-red-600 hover:bg-red-50 text-xs gap-1"
+                    title="Excluir do banco"
+                  >
+                    <Trash size={15} /> Excluir
+                  </Button>
+                </div>
+
+                <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
+                  <Button type="button" variant="outline" onClick={() => setEditOrderOpen(false)}>
+                    Cancelar
+                  </Button>
+                  <Button type="submit" className="bg-[#C5533B] hover:bg-[#A9432D] text-white font-semibold">
+                    Salvar Alterações
+                  </Button>
+                </div>
               </DialogFooter>
             </form>
           </DialogContent>

@@ -119,6 +119,30 @@ export function Dashboard() {
     }
   };
 
+  const handleRejectOrder = async (orderId) => {
+    if (!window.confirm("Deseja realmente RECUSAR este pedido?")) return;
+    try {
+      await api.patch(`/orders/${orderId}/status`, { status: "Cancelado" });
+      toast.info("Pedido recusado/cancelado.");
+      setOrders((prev) =>
+        prev.map((o) => (o.order_id === orderId ? { ...o, status: "Cancelado" } : o))
+      );
+    } catch {
+      toast.error("Erro ao recusar pedido");
+    }
+  };
+
+  const handleDeleteOrder = async (orderId) => {
+    if (!window.confirm("Tem certeza que deseja EXCLUIR este pedido permanentemente?")) return;
+    try {
+      await api.delete(`/orders/${orderId}`);
+      toast.success("Pedido excluído permanentemente!");
+      setOrders((prev) => prev.filter((o) => o.order_id !== orderId));
+    } catch {
+      toast.error("Erro ao excluir pedido");
+    }
+  };
+
   const generateAIInsights = async () => {
     setLoadingInsights(true);
     try {
@@ -303,23 +327,42 @@ export function Dashboard() {
                   </div>
                 </div>
 
-                <div className="mt-4 pt-2 flex items-center gap-2">
+                <div className="mt-4 pt-2 flex flex-col gap-2">
                   <Button
                     size="sm"
                     onClick={() => handleApproveOrder(ord.order_id)}
-                    className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold gap-1"
+                    className="w-full bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold gap-1 shadow-sm"
                   >
                     <CheckCircle size={15} weight="bold" /> Aprovar Pedido
                   </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => navigate(`/pedidos`)}
-                    className="border-stone-300 text-stone-700 text-xs px-2.5"
-                    title="Editar pedido"
-                  >
-                    <PencilSimple size={15} />
-                  </Button>
+                  <div className="flex items-center gap-1.5 w-full">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => handleRejectOrder(ord.order_id)}
+                      className="flex-1 text-red-600 border-red-200 hover:bg-red-50 text-[11px] font-semibold h-7"
+                    >
+                      Recusar
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => navigate(`/pedidos`)}
+                      className="border-stone-300 text-stone-700 text-[11px] h-7 px-2"
+                      title="Editar / Gerenciar Pedido"
+                    >
+                      Editar
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => handleDeleteOrder(ord.order_id)}
+                      className="text-red-500 hover:bg-red-50 text-[11px] h-7 px-2"
+                      title="Excluir Pedido"
+                    >
+                      Excluir
+                    </Button>
+                  </div>
                 </div>
               </div>
             ))}

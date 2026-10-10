@@ -8,9 +8,11 @@ import multer from "multer";
 import path from "path";
 import { fileURLToPath } from "url";
 import { GoogleGenAI } from "@google/genai";
+import JSZip from "jszip";
 import {
   getWhatsAppStatus,
   startWhatsAppBot,
+  forceReconnectWhatsApp,
   disconnectWhatsApp,
   simulateWhatsAppConnect,
   simulateQRCode,
@@ -666,6 +668,15 @@ apiRouter.post("/whatsapp/start", authMiddleware, async (_req, res) => {
   }
 });
 
+apiRouter.post("/whatsapp/force-reconnect", authMiddleware, async (_req, res) => {
+  try {
+    const result = await forceReconnectWhatsApp();
+    return res.json({ success: true, message: "Conexão forçada re-iniciada com sucesso!", status: result });
+  } catch (e: any) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
 apiRouter.post("/whatsapp/disconnect", authMiddleware, async (_req, res) => {
   try {
     const result = await disconnectWhatsApp();
@@ -770,14 +781,127 @@ apiRouter.get("/whatsapp/catalog-context", (_req, res) => {
       additionals: p.additionals || [],
     }));
 
-  const allCustomers = Array.from(customers.values()).map((c) => ({
-    customer_id: c.customer_id,
-    name: c.name,
-    phone: c.phone,
-    address: c.address,
-    delivery_zone_id: c.delivery_zone_id,
-    notes: c.notes,
-  }));
+  const allCustomers = Array.from(customers.values()).map((c) => {
+    const cleanPhone = (c.phone || "").replace(/\D/g, "");
+    const custOrders = Array.from(orders.values()).filter((o) => {
+      const oPhone = (o.customer_phone || "").replace(/\D/g, "");
+      return (
+        (c.customer_id && o.customer_id === c.customer_id) ||
+        (cleanPhone && oPhone && (oPhone.endsWith(cleanPhone) || cleanPhone.endsWith(oPhone)))
+      );
+    });
+
+    const itemCounts = new Map<string, number>();
+    const commonNotes = new Set<string>();
+    let lastOrder = null;
+
+    for (const ord of custOrders) {
+      if (ord.status !== "Cancelado") {
+        for (const item of ord.items || []) {
+          itemCounts.set(item.name, (itemCounts.get(item.name) || 0) + (item.quantity || 1));
+        }
+        if (ord.notes && ord.notes.length > 2) {
+          const cleanNote = ord.notes.replace(/\[WhatsApp #[^\]]+\]/g, "").trim();
+          if (cleanNote) commonNotes.add(cleanNote);
+        }
+      }
+    }
+
+    const sortedItems = Array.from(itemCounts.entries()).sort((a, b) => b[1] - a[1]);
+    const favoriteItem = sortedItems.length > 0 ? sortedItems[0][0] : null;
+
+    if (custOrders.length > 0) {
+      const sortedByDate = [...custOrders].sort(
+        (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+      );
+      lastOrder = {
+        order_id: sortedByDate[0].order_id,
+        items: sortedByDate[0].items,
+        total: sortedByDate[0].total,
+        delivery_type: sortedByDate[0].delivery_type,
+        address: sortedByDate[0].address,
+        payment_method: sortedByDate[0].payment_method,
+        created_at: sortedByDate[0].created_at,
+      };
+    }
+
+    return {
+      customer_id: c.customer_id,
+      name: c.name,
+      phone: c.phone,
+      address: c.address,
+      delivery_zone_id: c.delivery_zone_id,
+      notes: c.notes,
+      order_count: custOrders.length,
+      favorite_item: favoriteItem,
+      frequent_items: sortedItems.slice(0, 3).map(([name, count]) => `${count}x ${name}`),
+      habitual_notes: Array.from(commonNotes).filter(Boolean).slice(0, 2).join("; "),
+      last_order: lastOrder,
+    };
+  });
+
+  // Sintetiza clientes adicionais presentes nos pedidos que ainda não estão salvos na tabela de clientes
+  const knownPhones = new Set(allCustomers.map((c) => (c.phone || "").replace(/\D/g, "")));
+
+  for (const ord of Array.from(orders.values())) {
+    const rawP = (ord.customer_phone || "").replace(/\D/g, "");
+    if (rawP && rawP.length >= 8 && !knownPhones.has(rawP)) {
+      knownPhones.add(rawP);
+
+      const custOrders = Array.from(orders.values()).filter((o) => {
+        const oPhone = (o.customer_phone || "").replace(/\D/g, "");
+        return oPhone && (oPhone.endsWith(rawP) || rawP.endsWith(oPhone));
+      });
+
+      const itemCounts = new Map<string, number>();
+      const commonNotes = new Set<string>();
+      let lastOrder = null;
+
+      for (const o of custOrders) {
+        if (o.status !== "Cancelado") {
+          for (const item of o.items || []) {
+            itemCounts.set(item.name, (itemCounts.get(item.name) || 0) + (item.quantity || 1));
+          }
+          if (o.notes && o.notes.length > 2) {
+            const cleanNote = o.notes.replace(/\[WhatsApp #[^\]]+\]/g, "").trim();
+            if (cleanNote) commonNotes.add(cleanNote);
+          }
+        }
+      }
+
+      const sortedItems = Array.from(itemCounts.entries()).sort((a, b) => b[1] - a[1]);
+      const favoriteItem = sortedItems.length > 0 ? sortedItems[0][0] : null;
+
+      if (custOrders.length > 0) {
+        const sortedByDate = [...custOrders].sort(
+          (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+        );
+        lastOrder = {
+          order_id: sortedByDate[0].order_id,
+          items: sortedByDate[0].items,
+          total: sortedByDate[0].total,
+          delivery_type: sortedByDate[0].delivery_type,
+          address: sortedByDate[0].address,
+          payment_method: sortedByDate[0].payment_method,
+          created_at: sortedByDate[0].created_at,
+        };
+      }
+
+      allCustomers.push({
+        customer_id: `cust_syn_${rawP}`,
+        name: ord.customer_name || "Cliente WhatsApp",
+        phone: ord.customer_phone || rawP,
+        address: ord.address || "",
+        delivery_zone_id: null,
+        notes: "",
+        order_count: custOrders.length,
+        favorite_item: favoriteItem,
+        frequent_items: sortedItems.slice(0, 3).map(([name, count]) => `${count}x ${name}`),
+        habitual_notes: Array.from(commonNotes).filter(Boolean).slice(0, 2).join("; "),
+        last_order: lastOrder,
+      });
+    }
+  }
 
   const allZones = Array.from(deliveryZones.values()).map((z) => ({
     zone_id: z.zone_id,
@@ -2164,6 +2288,183 @@ Mensagem do cliente:
     items: matchedItems,
     notes: text.length > 100 ? text.substring(0, 100) : "",
   });
+});
+
+// ---------------- Backup & Restauração de Dados (.ZIP e .JSON) ----------------
+apiRouter.get("/backup/export", authMiddleware, async (req: AuthenticatedRequest, res) => {
+  const format = String(req.query.format || "zip").toLowerCase();
+  const userId = req.user!.user_id;
+
+  const data = {
+    metadata: {
+      app: "Marmita Hub PDV & Delivery",
+      version: "1.0.0",
+      exported_at: nowUtc(),
+      user_id: userId,
+      user_email: req.user!.email,
+    },
+    products: Array.from(products.values()),
+    orders: Array.from(orders.values()),
+    customers: Array.from(customers.values()),
+    delivery_zones: Array.from(deliveryZones.values()),
+    day_closes: Array.from(dayCloses.values()),
+    store_settings: {
+      accepting_orders: acceptingOrders,
+      high_demand_message: highDemandMessage,
+      scheduled_delivery_enabled: scheduledDeliveryEnabled,
+      scheduled_delivery_fee: scheduledDeliveryFee,
+      scheduled_delivery_hours: scheduledDeliveryHours,
+      ai_custom_instructions: aiCustomInstructions,
+      pix_key: pixKey,
+      pix_beneficiary: pixBeneficiary,
+      store_address: storeAddress,
+      store_maps_url: storeMapsUrl,
+      business_hours: businessHours,
+      day_state: globalDayState,
+      initial_cash_balance: initialCashBalance,
+    },
+    chats: getAllChats(),
+  };
+
+  const dateStr = new Date().toISOString().substring(0, 10);
+
+  if (format === "json") {
+    res.setHeader("Content-Type", "application/json");
+    res.setHeader("Content-Disposition", `attachment; filename="MarmitaHub_Backup_${dateStr}.json"`);
+    return res.json(data);
+  }
+
+  // Padrão: Exportar como arquivo .ZIP
+  try {
+    const zip = new JSZip();
+    zip.file("backup_metadata.json", JSON.stringify(data.metadata, null, 2));
+    zip.file("products.json", JSON.stringify(data.products, null, 2));
+    zip.file("orders.json", JSON.stringify(data.orders, null, 2));
+    zip.file("customers.json", JSON.stringify(data.customers, null, 2));
+    zip.file("delivery_zones.json", JSON.stringify(data.delivery_zones, null, 2));
+    zip.file("day_closes.json", JSON.stringify(data.day_closes, null, 2));
+    zip.file("store_settings.json", JSON.stringify(data.store_settings, null, 2));
+    zip.file("whatsapp_chats.json", JSON.stringify(data.chats, null, 2));
+    zip.file("marmita_hub_full_backup.json", JSON.stringify(data, null, 2));
+
+    const zipBuffer = await zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
+
+    res.setHeader("Content-Type", "application/zip");
+    res.setHeader("Content-Disposition", `attachment; filename="MarmitaHub_Backup_${dateStr}.zip"`);
+    return res.send(zipBuffer);
+  } catch (err: any) {
+    return res.status(500).json({ error: "Erro ao gerar arquivo ZIP de backup: " + err.message });
+  }
+});
+
+apiRouter.post(
+  "/backup/import",
+  authMiddleware,
+  upload.single("file"),
+  async (req: AuthenticatedRequest, res) => {
+    try {
+      let backupData: any = null;
+
+      if (req.file) {
+        const filename = req.file.originalname.toLowerCase();
+        if (filename.endsWith(".zip") || filename.endsWith(".zap")) {
+          const zip = await JSZip.loadAsync(req.file.buffer);
+          let jsonStr = "";
+          if (zip.file("marmita_hub_full_backup.json")) {
+            jsonStr = await zip.file("marmita_hub_full_backup.json")!.async("string");
+          } else if (zip.file("products.json")) {
+            const prods = JSON.parse(await zip.file("products.json")!.async("string"));
+            const ords = zip.file("orders.json") ? JSON.parse(await zip.file("orders.json")!.async("string")) : [];
+            const custs = zip.file("customers.json") ? JSON.parse(await zip.file("customers.json")!.async("string")) : [];
+            const zones = zip.file("delivery_zones.json") ? JSON.parse(await zip.file("delivery_zones.json")!.async("string")) : [];
+            const closes = zip.file("day_closes.json") ? JSON.parse(await zip.file("day_closes.json")!.async("string")) : [];
+            const settings = zip.file("store_settings.json") ? JSON.parse(await zip.file("store_settings.json")!.async("string")) : {};
+            backupData = {
+              products: prods,
+              orders: ords,
+              customers: custs,
+              delivery_zones: zones,
+              day_closes: closes,
+              store_settings: settings,
+            };
+          }
+          if (jsonStr) backupData = JSON.parse(jsonStr);
+        } else {
+          backupData = JSON.parse(req.file.buffer.toString("utf-8"));
+        }
+      } else if (req.body && (req.body.products || req.body.orders || req.body.customers)) {
+        backupData = req.body;
+      }
+
+      if (!backupData) {
+        return res.status(400).json({ detail: "Arquivo ou dados de backup inválidos." });
+      }
+
+      const userId = req.user!.user_id;
+
+      // Restauração das coleções no banco em memória
+      if (Array.isArray(backupData.products)) {
+        products.clear();
+        backupData.products.forEach((p: Product) => products.set(p.product_id, { ...p, user_id: userId }));
+      }
+      if (Array.isArray(backupData.orders)) {
+        orders.clear();
+        backupData.orders.forEach((o: Order) => orders.set(o.order_id, { ...o, user_id: userId }));
+      }
+      if (Array.isArray(backupData.customers)) {
+        customers.clear();
+        backupData.customers.forEach((c: Customer) => customers.set(c.customer_id, { ...c, user_id: userId }));
+      }
+      if (Array.isArray(backupData.delivery_zones)) {
+        deliveryZones.clear();
+        backupData.delivery_zones.forEach((z: DeliveryZone) => deliveryZones.set(z.zone_id, { ...z, user_id: userId }));
+      }
+      if (Array.isArray(backupData.day_closes)) {
+        dayCloses.clear();
+        backupData.day_closes.forEach((dc: DayClose) => dayCloses.set(dc.close_id, { ...dc, user_id: userId }));
+      }
+
+      if (backupData.store_settings) {
+        const st = backupData.store_settings;
+        if (typeof st.accepting_orders === "boolean") acceptingOrders = st.accepting_orders;
+        if (st.high_demand_message) highDemandMessage = st.high_demand_message;
+        if (st.pix_key) pixKey = st.pix_key;
+        if (st.pix_beneficiary) pixBeneficiary = st.pix_beneficiary;
+        if (st.store_address) storeAddress = st.store_address;
+        if (st.store_maps_url) storeMapsUrl = st.store_maps_url;
+        if (st.business_hours) businessHours = st.business_hours;
+        if (st.ai_custom_instructions) aiCustomInstructions = st.ai_custom_instructions;
+      }
+
+      return res.json({
+        success: true,
+        message: "Backup restaurado com sucesso!",
+        restored: {
+          products: products.size,
+          orders: orders.size,
+          customers: customers.size,
+          delivery_zones: deliveryZones.size,
+          day_closes: dayCloses.size,
+        },
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: "Erro ao importar backup: " + err.message });
+    }
+  }
+);
+
+apiRouter.post("/backup/send-whatsapp", authMiddleware, async (req: AuthenticatedRequest, res) => {
+  const { phone } = req.body || {};
+  const targetPhone = phone || "5511999998888";
+
+  const summaryText = `📦 *BACKUP DO MARMITA HUB* 📦\n━━━━━━━━━━━━━━━━━━\n🗓️ *Data:* ${new Date().toLocaleDateString("pt-BR")}\n🍛 *Produtos no cardápio:* ${products.size}\n📋 *Total de pedidos:* ${orders.size}\n👥 *Clientes cadastrados:* ${customers.size}\n🚚 *Zonas de entrega:* ${deliveryZones.size}\n💰 *Fechamentos arquivados:* ${dayCloses.size}\n━━━━━━━━━━━━━━━━━━\n✅ Todos os dados estão protegidos e sincronizados no sistema!`;
+
+  try {
+    const result = await sendManualChatMessage(targetPhone, summaryText, "Sistema de Backup");
+    return res.json({ success: true, message: "Backup enviado para o WhatsApp com sucesso!", result });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
 });
 
 app.use("/api", apiRouter);

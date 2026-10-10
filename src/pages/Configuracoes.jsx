@@ -28,6 +28,11 @@ import {
   CreditCard,
   Bluetooth,
   Storefront,
+  DownloadSimple,
+  UploadSimple,
+  FileZip,
+  Database,
+  WhatsappLogo,
 } from "@phosphor-icons/react";
 import { getAutoPrint, setAutoPrint, printReceipt } from "@/lib/print";
 import { pairPrinter, getPairedPrinter, clearPairedPrinter } from "@/lib/bluetooth-printer";
@@ -272,6 +277,48 @@ export default function Configuracoes() {
     }
   };
 
+  // Backup & Restauração (.ZIP, .JSON, .ZAP)
+  const [importingBackup, setImportingBackup] = useState(false);
+
+  const handleExportBackup = (format = "zip") => {
+    toast.info(`Gerando arquivo de backup em .${format.toUpperCase()}...`);
+    window.open(`/api/backup/export?format=${format}`, "_blank");
+  };
+
+  const handleImportBackup = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setImportingBackup(true);
+    const formData = new FormData();
+    formData.append("file", file);
+
+    try {
+      const res = await api.post("/backup/import", formData, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      toast.success(
+        `Backup restaurado com sucesso! Restaurados: ${res.data?.restored?.products || 0} produtos, ${res.data?.restored?.orders || 0} pedidos, ${res.data?.restored?.customers || 0} clientes.`
+      );
+      loadData();
+    } catch (err) {
+      toast.error("Erro ao importar backup: " + (err.response?.data?.detail || err.message));
+    } finally {
+      setImportingBackup(false);
+      e.target.value = "";
+    }
+  };
+
+  const handleSendBackupWhatsApp = async () => {
+    try {
+      toast.info("Enviando resumo do backup para o WhatsApp...");
+      await api.post("/backup/send-whatsapp", { phone: waStatus.phone || "5511999998888" });
+      toast.success("Resumo de backup enviado no WhatsApp!");
+    } catch {
+      toast.error("Erro ao enviar backup no WhatsApp");
+    }
+  };
+
   const isConnected = waStatus.is_connected || waStatus.status === "connected";
   const isQrReady = waStatus.status === "qr_ready" && waStatus.qr_code;
 
@@ -445,6 +492,100 @@ export default function Configuracoes() {
               </Button>
             </div>
           )}
+        </CardContent>
+      </Card>
+
+      {/* 1B. SISTEMA DE BACKUP E RESTAURAÇÃO (.ZIP / .ZAP / .JSON) */}
+      <Card className="border-stone-200 shadow-sm bg-white overflow-hidden">
+        <div className="p-5 border-b border-stone-200 bg-stone-50/80 flex items-center justify-between">
+          <div className="flex items-center gap-2.5">
+            <FileZip size={24} className="text-[#C5533B]" weight="duotone" />
+            <div>
+              <h2 className="font-display text-lg font-bold text-stone-900">
+                Backup e Restauração de Dados (.ZIP / .ZAP / .JSON)
+              </h2>
+              <p className="text-xs text-stone-500">
+                Baixe o backup completo em arquivo compactado .ZIP ou restauure dados com 1 clique
+              </p>
+            </div>
+          </div>
+          <Badge className="bg-blue-100 text-blue-800 border-blue-300 gap-1">
+            <Database size={14} /> Dados Protegidos
+          </Badge>
+        </div>
+
+        <CardContent className="p-6 space-y-4">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            {/* Exportar Backup ZIP */}
+            <div className="p-4 bg-stone-50 border border-stone-200 rounded-xl flex flex-col justify-between space-y-3">
+              <div>
+                <div className="flex items-center gap-2 font-bold text-stone-900 text-sm">
+                  <FileZip size={20} className="text-[#C5533B]" weight="fill" />
+                  <span>Exportar Backup (.ZIP)</span>
+                </div>
+                <p className="text-xs text-stone-500 mt-1">
+                  Compacta cardápio, histórico de pedidos, clientes, financeiro e conversas em um arquivo .ZIP.
+                </p>
+              </div>
+              <Button
+                onClick={() => handleExportBackup("zip")}
+                className="w-full bg-[#C5533B] hover:bg-[#A9432D] text-white text-xs gap-1.5 font-semibold"
+              >
+                <DownloadSimple size={16} weight="bold" /> Baixar Backup .ZIP
+              </Button>
+            </div>
+
+            {/* Importar Backup */}
+            <div className="p-4 bg-stone-50 border border-stone-200 rounded-xl flex flex-col justify-between space-y-3">
+              <div>
+                <div className="flex items-center gap-2 font-bold text-stone-900 text-sm">
+                  <UploadSimple size={20} className="text-emerald-600" weight="bold" />
+                  <span>Restaurar / Importar (.ZIP / .JSON)</span>
+                </div>
+                <p className="text-xs text-stone-500 mt-1">
+                  Selecione um arquivo de backup (.ZIP ou .JSON) para restaurar todo o banco de dados.
+                </p>
+              </div>
+              <label className="w-full">
+                <Button
+                  asChild
+                  disabled={importingBackup}
+                  className="w-full bg-emerald-600 hover:bg-emerald-700 text-white text-xs gap-1.5 font-semibold cursor-pointer"
+                >
+                  <span>
+                    <UploadSimple size={16} weight="bold" />
+                    {importingBackup ? "Restaurando..." : "Selecionar e Restaurar"}
+                  </span>
+                </Button>
+                <input
+                  type="file"
+                  accept=".zip,.json"
+                  onChange={handleImportBackup}
+                  className="hidden"
+                />
+              </label>
+            </div>
+
+            {/* Enviar Backup no WhatsApp (.ZAP) */}
+            <div className="p-4 bg-stone-50 border border-stone-200 rounded-xl flex flex-col justify-between space-y-3">
+              <div>
+                <div className="flex items-center gap-2 font-bold text-stone-900 text-sm">
+                  <WhatsappLogo size={20} className="text-emerald-600" weight="fill" />
+                  <span>Enviar Backup pelo WhatsApp (.ZAP)</span>
+                </div>
+                <p className="text-xs text-stone-500 mt-1">
+                  Envia um relatório sumarizado de conferência de dados direto para o seu WhatsApp.
+                </p>
+              </div>
+              <Button
+                onClick={handleSendBackupWhatsApp}
+                variant="outline"
+                className="w-full border-emerald-300 text-emerald-800 hover:bg-emerald-50 text-xs gap-1.5 font-semibold"
+              >
+                <WhatsappLogo size={16} weight="fill" /> Enviar Resumo no WhatsApp
+              </Button>
+            </div>
+          </div>
         </CardContent>
       </Card>
 
@@ -848,6 +989,116 @@ export default function Configuracoes() {
               </pre>
             </div>
           )}
+        </CardContent>
+      </Card>
+
+      {/* 7. SISTEMA DE BACKUP E RESTAURAÇÃO (.ZIP, .ZAP, .JSON) */}
+      <Card className="border-stone-200 shadow-sm bg-white">
+        <div className="p-5 border-b border-stone-200 bg-stone-50/80 flex items-center justify-between">
+          <div className="flex items-center gap-2.5">
+            <Database size={22} className="text-blue-600" weight="duotone" />
+            <div>
+              <h2 className="font-display text-lg font-bold text-stone-900">
+                Backup e Restauração Completa de Dados
+              </h2>
+              <p className="text-xs text-stone-500">
+                Exporte ou importe arquivos de backup comprimidos em .ZIP, .ZAP ou .JSON com todos os produtos, clientes e pedidos
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <CardContent className="p-6 space-y-6">
+          {/* Download & Exportar */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="p-4 rounded-xl border border-stone-200 bg-stone-50/50 flex flex-col justify-between space-y-3">
+              <div>
+                <div className="flex items-center gap-2 text-stone-900 font-semibold text-sm">
+                  <FileZip size={20} className="text-blue-600" weight="bold" />
+                  <span>Backup em .ZIP / .ZAP</span>
+                </div>
+                <p className="text-xs text-stone-500 mt-1">
+                  Exporta todos os bancos de dados separados em arquivos JSON dentro de um arquivo .ZIP seguro.
+                </p>
+              </div>
+              <Button
+                onClick={() => handleExportBackup("zip")}
+                className="bg-blue-600 hover:bg-blue-700 text-white text-xs gap-1.5 w-full"
+              >
+                <DownloadSimple size={15} weight="bold" />
+                Baixar Backup (.ZIP)
+              </Button>
+            </div>
+
+            <div className="p-4 rounded-xl border border-stone-200 bg-stone-50/50 flex flex-col justify-between space-y-3">
+              <div>
+                <div className="flex items-center gap-2 text-stone-900 font-semibold text-sm">
+                  <Database size={20} className="text-emerald-600" weight="bold" />
+                  <span>Backup Completo em .JSON</span>
+                </div>
+                <p className="text-xs text-stone-500 mt-1">
+                  Exporta um único arquivo .JSON unificado para integração ou migração rápida.
+                </p>
+              </div>
+              <Button
+                variant="outline"
+                onClick={() => handleExportBackup("json")}
+                className="border-stone-300 text-stone-800 text-xs gap-1.5 w-full hover:bg-stone-100"
+              >
+                <DownloadSimple size={15} weight="bold" />
+                Baixar Backup (.JSON)
+              </Button>
+            </div>
+
+            <div className="p-4 rounded-xl border border-stone-200 bg-stone-50/50 flex flex-col justify-between space-y-3">
+              <div>
+                <div className="flex items-center gap-2 text-stone-900 font-semibold text-sm">
+                  <WhatsappLogo size={20} className="text-emerald-600" weight="fill" />
+                  <span>Relatório WhatsApp</span>
+                </div>
+                <p className="text-xs text-stone-500 mt-1">
+                  Envia um resumo estruturado com totais de produtos, pedidos e clientes diretamente no WhatsApp.
+                </p>
+              </div>
+              <Button
+                variant="outline"
+                onClick={handleSendBackupWhatsApp}
+                className="border-emerald-200 text-emerald-800 bg-emerald-50 hover:bg-emerald-100 text-xs gap-1.5 w-full"
+              >
+                <WhatsappLogo size={15} weight="bold" />
+                Enviar no WhatsApp
+              </Button>
+            </div>
+          </div>
+
+          {/* Upload e Importar Backup */}
+          <div className="p-5 rounded-xl border-2 border-dashed border-stone-300 bg-stone-50/30 text-center space-y-3">
+            <div className="w-10 h-10 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center mx-auto">
+              <UploadSimple size={22} weight="bold" />
+            </div>
+            <div>
+              <h3 className="font-semibold text-stone-900 text-sm">Restaurar Dados de Backup (.ZIP, .ZAP, .JSON)</h3>
+              <p className="text-xs text-stone-500 max-w-md mx-auto mt-1">
+                Selecione o arquivo de backup para restaurar produtos, pedidos, clientes, regiões e configurações da loja.
+              </p>
+            </div>
+
+            <div className="pt-2 flex justify-center">
+              <label className="cursor-pointer">
+                <Input
+                  type="file"
+                  accept=".zip,.zap,.json"
+                  onChange={handleImportBackup}
+                  disabled={importingBackup}
+                  className="hidden"
+                />
+                <span className="inline-flex items-center gap-2 px-4 py-2 bg-stone-900 hover:bg-stone-800 text-white font-medium text-xs rounded-lg transition-colors">
+                  <UploadSimple size={16} weight="bold" />
+                  {importingBackup ? "Restaurando Backup..." : "Selecionar Arquivo .ZIP / .JSON"}
+                </span>
+              </label>
+            </div>
+          </div>
         </CardContent>
       </Card>
     </div>

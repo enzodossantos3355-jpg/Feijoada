@@ -190,6 +190,19 @@ export async function processCustomerMessageWithAI(userPhone, incomingMessage, p
 
   const contextData = customContext || (await fetchSystemContext());
   const registeredCustomer = matchRegisteredCustomer(userPhone, contextData.customers);
+  const existingPendingOrder = getPendingOrder(userPhone);
+
+  // Instrução sobre pedido existente em análise
+  const pendingOrderPrompt = existingPendingOrder
+    ? `🚨 ATENÇÃO - PEDIDO JÁ EXISTENTE EM ANÁLISE PARA ESTE CLIENTE:
+• Código do pedido já anotado: #${existingPendingOrder.orderCode}
+• Itens já anotados: ${existingPendingOrder.items?.map(i => `${i.quantity}x ${i.name}`).join(", ") || "Refeição"}
+• Total: R$ ${Number(existingPendingOrder.estimated_total || existingPendingOrder.total || 0).toFixed(2)}
+• REGRA CRÍTICA PARA EVITAR DUPLICIDADE:
+  - O cliente JÁ possui o pedido #${existingPendingOrder.orderCode} registrado!
+  - O campo "is_complete" DEVE SER STRICTAMENTE FALSE a menos que o cliente diga explicitamente "quero fazer um novo pedido do zero".
+  - Se ele estiver enviando comprovante Pix, tirando dúvidas (Pix, tempo, endereço, troco), agradecendo ou mandando áudio, RESPONDA À DÚVIDA DELE COM CORDIALIDADE e refira-se ao pedido #${existingPendingOrder.orderCode}. NÃO crie um novo pedido!`
+    : "NENHUM PEDIDO PENDENTE ANTERIOR.";
 
   // Formatação do Cardápio real
   const catalogPrompt = (contextData.products || [])
@@ -216,16 +229,25 @@ export async function processCustomerMessageWithAI(userPhone, incomingMessage, p
 • Regra: Se o cliente quiser agendar para horário específico, informe a taxa e registre o horário desejado!`
     : "ENTREGA PROGRAMADA: No momento disponível apenas entrega imediata.";
 
-  // Informações do Cliente Cadastrado
+  // Informações do Cliente Cadastrado & Hábitos de Consumo
   const customerPrompt = registeredCustomer
-    ? `CLIENTE JÁ CADASTRADO NO SISTEMA:
+    ? `PERFIL E HISTÓRICO DO CLIENTE:
 • Nome: ${registeredCustomer.name}
-• Telefone cadastrado: ${registeredCustomer.phone}
-• Endereço salvo: ${registeredCustomer.address || "Não informado"}
-• Observações do cliente: ${registeredCustomer.notes || "Nenhuma"}
-(Instrução: Cumprimente pelo nome "${registeredCustomer.name}". Se for entrega e ele não falar outro endereço, pergunte se prefere no endereço já cadastrado dele: "${registeredCustomer.address}")`
-    : `CLIENTE NÃO CADASTRADO PREVIAMENTE:
-• Nome sugerido pelo WhatsApp: ${pushName || "Cliente"}`;
+• Telefone: ${registeredCustomer.phone}
+• Endereço Cadastrado: ${registeredCustomer.address || "Não informado"}
+• Total de Pedidos Anteriores: ${registeredCustomer.order_count || 0}
+• Prato Favorito / Mais Pedido: "${registeredCustomer.favorite_item || "Marmita da casa"}"
+• Itens Mais Frequentes: ${registeredCustomer.frequent_items?.join(", ") || "Nenhum ainda"}
+• Observações e Guarnições Habituais: "${registeredCustomer.habitual_notes || "Sem restrições"}"
+${registeredCustomer.last_order ? `• Último Pedido: ${registeredCustomer.last_order.items?.map(i => `${i.quantity}x ${i.name}`).join(", ")} (${registeredCustomer.last_order.delivery_type})` : ""}
+
+INSTRUÇÃO MANDATÓRIA DE PERSONALIZAÇÃO BASEADA NOS GOSTOS DO CLIENTE:
+1. Conheça os gostos de ${registeredCustomer.name}! Cumprimente pelo nome.
+2. Se o cliente disser "quero o de sempre", "manda o meu habitual" ou similar, monte O PEDIDO AUTOMATICAMENTE com o prato favorito dele ("${registeredCustomer.favorite_item || "Marmita Tradicional"}"), no endereço "${registeredCustomer.address || "salvo"}" com as observações habitual ("${registeredCustomer.habitual_notes || ""}")!
+3. Sugira de forma gentil o prato favorito ou adicionais que ele costuma gostar!`
+    : `CLIENTE NOVO / NÃO CADASTRADO:
+• Nome sugerido pelo WhatsApp: ${pushName || "Cliente"}
+• Instrução: Atenda com receptividade, pergunte o nome se necessário e ofereça as opções do cardápio!`;
 
   // Informações de Alta Demanda
   const demandPrompt = !contextData.accepting_orders
